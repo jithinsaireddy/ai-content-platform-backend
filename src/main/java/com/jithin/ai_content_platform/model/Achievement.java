@@ -3,13 +3,15 @@
 package com.jithin.ai_content_platform.model;
 
 import jakarta.persistence.*;
-import lombok.Data;
+import lombok.Getter;
+import lombok.Setter;
 
 import java.util.Set;
 
 @Entity
 @Table(name = "achievements")
-@Data
+@Getter
+@Setter
 public class Achievement {
 
     @Id

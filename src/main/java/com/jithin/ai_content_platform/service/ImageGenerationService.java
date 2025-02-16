@@ -45,4 +45,33 @@ public class ImageGenerationService {
 
         return null;
     }
+
+    public String generateVideo(String prompt) {
+        RestTemplate restTemplate = new RestTemplate();
+        String url = "https://api.openai.com/v1/videos/generations"; // Assuming a hypothetical endpoint for video generation
+
+        HttpHeaders headers = new HttpHeaders();
+        headers.setContentType(MediaType.APPLICATION_JSON);
+        headers.setBearerAuth(openaiApiKey);
+
+        Map<String, Object> requestBody = new HashMap<>();
+        requestBody.put("prompt", prompt);
+        requestBody.put("n", 1);
+        requestBody.put("duration", 30); // Set duration for the video
+
+        HttpEntity<Map<String, Object>> entity = new HttpEntity<>(requestBody, headers);
+
+        ResponseEntity<Map> response = restTemplate.exchange(url, HttpMethod.POST, entity, Map.class);
+
+        if (response.getStatusCode() == HttpStatus.OK) {
+            Map<String, Object> responseBody = response.getBody();
+            if (responseBody != null && responseBody.containsKey("data")) {
+                // Extract video URL
+                Map<String, Object> data = ((List<Map<String, Object>>) responseBody.get("data")).get(0);
+                return (String) data.get("url");
+            }
+        }
+
+        return null;
+    }
 }

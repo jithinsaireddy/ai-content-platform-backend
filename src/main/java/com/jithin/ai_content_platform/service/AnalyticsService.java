@@ -33,4 +33,17 @@ public class AnalyticsService {
         // Add more stats as needed
         return stats;
     }
+
+    public Map<String, Object> getContentPerformance(String username) {
+        User user = userRepository.findByUsername(username).orElseThrow(() ->
+                new RuntimeException("User not found"));
+
+        Map<String, Object> performanceMetrics = new HashMap<>();
+        performanceMetrics.put("totalContent", contentRepository.countByUser(user));
+        performanceMetrics.put("averageEngagement", contentRepository.averageEngagementByUser(user));
+        // Placeholder for additional metrics
+        performanceMetrics.put("totalViews", 1000);
+        performanceMetrics.put("engagementRate", 5.5);
+        return performanceMetrics;
+    }
 }

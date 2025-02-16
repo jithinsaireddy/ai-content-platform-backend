@@ -3,14 +3,16 @@
 package com.jithin.ai_content_platform.model;
 
 import jakarta.persistence.*;
-import lombok.Data;
+import lombok.Getter;
+import lombok.Setter;
 
 import java.util.HashSet;
 import java.util.Set;
 
 @Entity
 @Table(name = "projects")
-@Data
+@Getter
+@Setter
 public class Project {
 
     @Id

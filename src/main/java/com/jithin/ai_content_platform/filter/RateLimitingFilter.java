@@ -10,7 +10,7 @@ import org.springframework.stereotype.Component;
 import java.io.IOException;
 import java.util.concurrent.ConcurrentHashMap;
 
-//@Component
+@Component
 public class RateLimitingFilter implements Filter {
 
     private static final long MAX_REQUESTS_PER_MINUTE = 60;
@@ -19,6 +19,7 @@ public class RateLimitingFilter implements Filter {
 
     @Override
     public void doFilter(ServletRequest request, ServletResponse response, FilterChain chain) throws IOException, ServletException {
+
         String clientIp = request.getRemoteAddr();
         long currentTime = System.currentTimeMillis();
 
