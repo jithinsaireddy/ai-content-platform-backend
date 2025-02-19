@@ -165,6 +165,9 @@ public class Content {
     @Column(name = "content_quality_score")
     private Double contentQualityScore;
 
+    @Column(columnDefinition = "TEXT")
+    private String contentStructure;
+
     private static final Logger logger = LoggerFactory.getLogger(Content.class);
     private static final ObjectMapper objectMapper = new ObjectMapper();
 
@@ -315,6 +318,32 @@ public class Content {
             return objectMapper.readValue(analyzedSentiment, new TypeReference<Map<String, Object>>() {});
         } catch (JsonProcessingException e) {
             logger.error("Error parsing analyzed sentiment for content {}: {}", id, e.getMessage());
+            return new HashMap<>();
+        }
+    }
+
+    @JsonIgnore
+    public Map<String, Double> getReadabilityMetrics() {
+        try {
+            if (readabilityScore == null || readabilityScore.isEmpty()) {
+                return new HashMap<>();
+            }
+            return objectMapper.readValue(readabilityScore, new TypeReference<Map<String, Double>>() {});
+        } catch (JsonProcessingException e) {
+            logger.error("Error parsing readability metrics for content {}: {}", id, e.getMessage());
+            return new HashMap<>();
+        }
+    }
+
+    @JsonIgnore
+    public Map<String, Object> getContentStructureMetrics() {
+        try {
+            if (contentStructure == null || contentStructure.isEmpty()) {
+                return new HashMap<>();
+            }
+            return objectMapper.readValue(contentStructure, new TypeReference<Map<String, Object>>() {});
+        } catch (JsonProcessingException e) {
+            logger.error("Error parsing content structure metrics for content {}: {}", id, e.getMessage());
             return new HashMap<>();
         }
     }

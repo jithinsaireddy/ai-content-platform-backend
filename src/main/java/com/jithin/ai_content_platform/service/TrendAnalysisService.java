@@ -61,6 +61,7 @@ import java.util.stream.Collectors;
 public class TrendAnalysisService {
 
     private static final Logger logger = LoggerFactory.getLogger(TrendAnalysisService.class);
+    private static final int MAX_KEYWORDS_TO_ANALYZE = 10;
 
     @Autowired
     private ContentRepository contentRepository;
@@ -296,50 +297,42 @@ private int defaultLimit;
         if (content == null) {
             return scores;
         }
-
+    
         try {
-            // Extract keywords and calculate trend scores
-            Set<String> keywords = extractKeywords(content);
+            // Get only main keywords with limit
+            Set<String> keywords = new HashSet<>();
+            
+            // Add title if present
+            if (content.getTitle() != null) {
+                keywords.add(content.getTitle());
+            }
+            
+            // Add keywords from content
+            if (content.getKeywords() != null) {
+                Arrays.stream(content.getKeywords().split(",\\s*"))
+                    .limit(MAX_KEYWORDS_TO_ANALYZE - (content.getTitle() != null ? 1 : 0))
+                    .forEach(keywords::add);
+            }
+    
             String trendDataJson = content.getTrendData();
             Map<String, Object> trendDataMap = trendDataJson != null ? 
                 objectMapper.readValue(trendDataJson, new TypeReference<Map<String, Object>>() {}) : 
                 new HashMap<>();
             
-            // Calculate engagement score using all content
- // Calculate engagement score using paginated content
-int pageSize = 100;
-int pageNumber = 0;
-double totalEngagement = 0.0;
-long totalItems = 0;
-Page<Content> contentPage;
-
-do {
-    // Get only 100 records at a time
-    Pageable pageable = PageRequest.of(pageNumber, pageSize);
-    contentPage = contentRepository.findAll(pageable);
+            // Calculate engagement score
+            double engagement = calculateTrendEngagementScore(Collections.singletonList(content));
+            
+            // Only analyze the limited set of keywords
+            keywords.forEach(keyword -> {
+                Map<String, Object> trendMetrics = calculateEnhancedTrendMetrics(keyword, engagement, trendDataMap, content.getRegion());
+                scores.put(keyword, trendMetrics);
+            });
     
-    // Calculate engagement for this batch
-    double batchEngagement = calculateTrendEngagementScore(contentPage.getContent());
-    
-    totalEngagement += batchEngagement * contentPage.getNumberOfElements();
-    totalItems += contentPage.getNumberOfElements();
-    
-    pageNumber++;
-} while (contentPage.hasNext() && pageNumber < 5);
-
-// Calculate average engagement
-double engagement = totalItems > 0 ? totalEngagement / totalItems : 0.0;
-
-keywords.forEach(keyword -> {
-    Map<String, Object> trendMetrics = calculateEnhancedTrendMetrics(keyword, engagement, trendDataMap, content.getRegion());
-    scores.put(keyword, trendMetrics);
-});
         } catch (Exception e) {
             logger.error("Error analyzing trend scores for content: {}", content.getId(), e);
         }
         return scores;
     }
-
     private List<String> getFormattedHistoricalDates(String keyword) {
         try {
             List<TrendData> historicalData = trendDataRepository.findByTopic(keyword);

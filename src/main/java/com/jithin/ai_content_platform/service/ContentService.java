@@ -3,6 +3,7 @@ package com.jithin.ai_content_platform.service;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.apache.commons.lang3.StringUtils;
 import com.jithin.ai_content_platform.exception.UserNotFoundException;
 import com.jithin.ai_content_platform.model.CommunityModel;
 import com.jithin.ai_content_platform.model.Content;
@@ -42,6 +43,8 @@ import java.util.regex.Matcher;
 @Service
 @Slf4j
 public class ContentService {
+
+    private static final int MAX_KEYWORDS_TO_ANALYZE = 10;
 
     @Autowired
     private ContentRepository contentRepository;
@@ -119,6 +122,8 @@ public class ContentService {
                 .updatedAt(LocalDateTime.now())
                 .status("DRAFT")
                 .build();
+                Map<String, Double> readabilityMetrics = calculateReadabilityMetrics(generatedContent);
+content.setReadabilityScore(objectMapper.writeValueAsString(readabilityMetrics));
 
             try {
                 // Add context-aware sentiment analysis
@@ -373,8 +378,11 @@ public class ContentService {
                 generatedContent.getContentBody()
             );
             
-            // Add to content metrics
-            content.getMetricsMap().put("readability", readabilityMetrics);
+            // Set readability score and content structure in dedicated fields
+            content.setReadabilityScore(objectMapper.writeValueAsString(readabilityMetrics));
+            content.setContentStructure(objectMapper.writeValueAsString(structureMetrics));
+            
+            // Add structure metrics to content metrics
             content.getMetricsMap().put("structure", structureMetrics);
 
             // Generate SEO suggestions based on the generated content
@@ -408,10 +416,10 @@ public class ContentService {
             // Extract detailed sentiment metrics
             Map<String, Object> detailedSentiment = new HashMap<>();
             detailedSentiment.put("overall_score", sentimentAnalysis.get("overall_sentiment"));
+            detailedSentiment.put("confidence_score", sentimentAnalysis.get("confidence_score"));
             detailedSentiment.put("entity_sentiments", sentimentAnalysis.get("entity_sentiments"));
             detailedSentiment.put("topic_sentiments", sentimentAnalysis.get("topic_sentiments"));
             detailedSentiment.put("sentence_analysis", sentimentAnalysis.get("sentence_analysis"));
-            detailedSentiment.put("confidence_score", sentimentAnalysis.get("confidence_score"));
             
             // Calculate sentiment distribution
             Map<String, Object> sentimentDistribution = calculateSentimentDistribution(
@@ -438,37 +446,86 @@ content.setStanfordSentiment(String.valueOf(sentimentScore));
 }
             content.setAnalyzedSentiment(objectMapper.writeValueAsString(detailedSentiment));
 
-            // Calculate trend weights and patterns
             Map<String, Double> contentWeights = dynamicTrendWeightService.calculateContentWeights(content);
-            
+
             // Get trend patterns and data
-            Map<String, Object> trendData = new HashMap<>();
-            try {
-                Map<String, Object> trendPatterns = trendAnalysisService.analyzeTrends(Collections.singletonList(content));
-                trendData.put("trendPatterns", trendPatterns);
-                trendData.put("contentWeights", contentWeights);
-                trendData.put("expandedKeywords", trendAnalysisService.findRelatedKeywords(content.getTitle()));
-                
-                // Get historical trend data
-                List<Double> historicalValues = trendAnalysisService.getHistoricalTrendValues(content.getTitle());
-                List<LocalDateTime> historicalDates = trendAnalysisService.getHistoricalTrendDates(content.getTitle());
-                
-                Map<String, Double> interestOverTime = new HashMap<>();
-                if (historicalDates != null && !historicalDates.isEmpty() && 
-                historicalValues != null && !historicalValues.isEmpty()) {
-                for (int i = 0; i < historicalDates.size(); i++) {
-                    interestOverTime.put(historicalDates.get(i).toString(), historicalValues.get(i));
-                }
-            } else {
-                // Add default current timestamp with neutral value
-                interestOverTime.put(LocalDateTime.now().toString(), 0.5);
+Map<String, Object> trendData = new HashMap<>();
+try {
+    // Only analyze the main keywords and title
+    Set<String> keywordsToAnalyze = new HashSet<>();
+    if (content.getTitle() != null) {
+        keywordsToAnalyze.add(content.getTitle());
+    }
+    if (content.getKeywords() != null) {
+        Arrays.stream(content.getKeywords().split(",\\s*"))
+            .limit(MAX_KEYWORDS_TO_ANALYZE - (content.getTitle() != null ? 1 : 0))
+            .forEach(keywordsToAnalyze::add);
+    }
+    
+    Content limitedContent = new Content();
+    limitedContent.setTitle(content.getTitle());
+    limitedContent.setKeywords(String.join(", ", keywordsToAnalyze));
+    limitedContent.setRegion(content.getRegion());
+    
+    Map<String, Object> trendPatterns = trendAnalysisService.analyzeTrends(Collections.singletonList(limitedContent));
+    trendData.put("trendPatterns", trendPatterns);
+    trendData.put("contentWeights", contentWeights);
+    
+    // Get historical trend data only for the title
+    if (content.getTitle() != null) {
+        List<Double> historicalValues = trendAnalysisService.getHistoricalTrendValues(content.getTitle());
+        List<LocalDateTime> historicalDates = trendAnalysisService.getHistoricalTrendDates(content.getTitle());
+        
+        Map<String, Double> interestOverTime = new HashMap<>();
+        if (historicalDates != null && !historicalDates.isEmpty() && 
+            historicalValues != null && !historicalValues.isEmpty()) {
+            for (int i = 0; i < historicalDates.size(); i++) {
+                interestOverTime.put(historicalDates.get(i).toString(), historicalValues.get(i));
             }
-            trendData.put("interestOverTime", interestOverTime);
-        } catch (Exception e) {
-            log.warn("No timeline data found for content: {}", content.getTitle());
-            trendData.put("interestOverTime", Collections.emptyMap());
+        } else {
+            // Add default current timestamp with neutral value
+            interestOverTime.put(LocalDateTime.now().toString(), 0.5);
         }
-            content.setTrendData(objectMapper.writeValueAsString(trendData));
+        trendData.put("interestOverTime", interestOverTime);
+    }
+} catch (Exception e) {
+    log.warn("Error analyzing trends for content: {}", content.getTitle(), e);
+    trendData.put("trendPatterns", Collections.emptyMap());
+    trendData.put("interestOverTime", Collections.emptyMap());
+}
+content.setTrendData(objectMapper.writeValueAsString(trendData));
+
+            // Calculate trend weights and patterns
+        //     Map<String, Double> contentWeights = dynamicTrendWeightService.calculateContentWeights(content);
+            
+        //     // Get trend patterns and data
+        //     Map<String, Object> trendData = new HashMap<>();
+        //     try {
+        //         Map<String, Object> trendPatterns = trendAnalysisService.analyzeTrends(Collections.singletonList(content));
+        //         trendData.put("trendPatterns", trendPatterns);
+        //         trendData.put("contentWeights", contentWeights);
+        //         trendData.put("expandedKeywords", trendAnalysisService.findRelatedKeywords(content.getTitle()));
+                
+        //         // Get historical trend data
+        //         List<Double> historicalValues = trendAnalysisService.getHistoricalTrendValues(content.getTitle());
+        //         List<LocalDateTime> historicalDates = trendAnalysisService.getHistoricalTrendDates(content.getTitle());
+                
+        //         Map<String, Double> interestOverTime = new HashMap<>();
+        //         if (historicalDates != null && !historicalDates.isEmpty() && 
+        //         historicalValues != null && !historicalValues.isEmpty()) {
+        //         for (int i = 0; i < historicalDates.size(); i++) {
+        //             interestOverTime.put(historicalDates.get(i).toString(), historicalValues.get(i));
+        //         }
+        //     } else {
+        //         // Add default current timestamp with neutral value
+        //         interestOverTime.put(LocalDateTime.now().toString(), 0.5);
+        //     }
+        //     trendData.put("interestOverTime", interestOverTime);
+        // } catch (Exception e) {
+        //     log.warn("No timeline data found for content: {}", content.getTitle());
+        //     trendData.put("interestOverTime", Collections.emptyMap());
+        // }
+        //     content.setTrendData(objectMapper.writeValueAsString(trendData));
 
             // Get engagement prediction using existing service
             Map<String, Object> engagementPrediction = mlPredictionService.predictEngagementMetrics(content);
@@ -671,37 +728,24 @@ if (trendingTopicsMap != null && !trendingTopicsMap.isEmpty()) {
             if (generatedContent == null || generatedContent.trim().isEmpty()) {
                 throw new RuntimeException("Failed to generate content");
             }
+            
+            // Create content object with the full response
+            Content content = new Content();
+            content.setContentBody(generatedContent.trim());
 
-            // Parse the structured response
+            Map<String, Double> readabilityMetrics = calculateReadabilityMetrics(content.getContentBody());
+content.setReadabilityScore(objectMapper.writeValueAsString(readabilityMetrics));
+            
+            // Extract sections without removing them from content
             String[] sections = generatedContent.split("(?m)^## ");
-            String contentBody = "";
-            String keywords = "";
-            String region = "";
-            String analysis = "";
-
             for (String section : sections) {
                 String sectionLower = section.toLowerCase().trim();
                 if (sectionLower.startsWith("keywords")) {
-                    keywords = section.substring("keywords".length()).trim();
+                    content.setKeywords(section.substring("keywords".length()).trim());
                 } else if (sectionLower.startsWith("region")) {
-                    region = section.substring("region".length()).trim();
-                } else if (sectionLower.startsWith("analysis")) {
-                    analysis = section.substring("analysis".length()).trim();
-                } else {
-                    contentBody += section;
+                    content.setRegion(section.substring("region".length()).trim());
                 }
             }
-
-            // Create content object with structured data
-            Content content = new Content();
-            content.setContentBody(contentBody.trim());
-            content.setKeywords(keywords);
-            content.setRegion(region);
-            
-            // Store analysis in metrics
-            Map<String, Object> metrics = new HashMap<>();
-            metrics.put("analysis", analysis);
-            content.setMetricsMap(metrics);
             
             return content;
         } catch (Exception e) {
@@ -766,6 +810,20 @@ if (trendingTopicsMap != null && !trendingTopicsMap.isEmpty()) {
         }
     }
 
+    private Map<String, Double> calculateReadabilityMetrics(String text) {
+        // Use enhanced service and convert to the expected format
+        Map<String, Object> enhancedMetrics = enhancedContentGenerationService.calculateReadabilityScore(text);
+        
+        Map<String, Double> metrics = new HashMap<>();
+        metrics.put("fleschReadingEase", ((Number) enhancedMetrics.get("flesch_reading_ease")).doubleValue());
+        metrics.put("avgSentenceLength", ((Number) enhancedMetrics.get("avg_sentence_length")).doubleValue());
+        metrics.put("avgWordLength", ((Number) enhancedMetrics.get("avg_word_length")).doubleValue());
+        metrics.put("paragraphCoherence", ((Number) enhancedMetrics.get("paragraph_coherence")).doubleValue());
+        metrics.put("readabilityLevel", ((Number) enhancedMetrics.get("flesch_reading_ease")).doubleValue() / 100.0); // Normalize to 0-1 scale
+        
+        return metrics;
+    }
+
     @Transactional
     public Content analyzeContent(Content content) {
         try {
@@ -817,6 +875,15 @@ if (trendingTopicsMap != null && !trendingTopicsMap.isEmpty()) {
         content.setCreatedAt(LocalDateTime.now());
         content.setUpdatedAt(LocalDateTime.now());
         content.setStatus("ACTIVE");
+
+// Add readability analysis
+try {
+    Map<String, Double> readabilityMetrics = calculateReadabilityMetrics(contentText);
+    content.setReadabilityScore(objectMapper.writeValueAsString(readabilityMetrics));
+} catch (JsonProcessingException e) {
+    log.error("Error serializing readability metrics", e);
+    content.setReadabilityScore("{}"); // Set empty JSON object as fallback
+}
         return content;
     }
 
@@ -1000,48 +1067,48 @@ if (trendingTopicsMap != null && !trendingTopicsMap.isEmpty()) {
         return categorizer.getBestCategory(categoryProbs);
     }
 
-    private Map<String, Double> calculateReadabilityMetrics(String text) {
-        Map<String, Double> metrics = new HashMap<>();
+    // private Map<String, Double> calculateReadabilityMetrics(String text) {
+    //     Map<String, Double> metrics = new HashMap<>();
         
-        try {
-            // Split text into sentences and words
-            String[] sentences = text.split("[.!?]+");
-            String[] words = text.split("\\s+");
+    //     try {
+    //         // Split text into sentences and words
+    //         String[] sentences = text.split("[.!?]+");
+    //         String[] words = text.split("\\s+");
             
-            // Calculate basic metrics
-            int totalSentences = sentences.length;
-            int totalWords = words.length;
-            int totalSyllables = countSyllables(text);
-            int complexWords = countComplexWords(words);
+    //         // Calculate basic metrics
+    //         int totalSentences = sentences.length;
+    //         int totalWords = words.length;
+    //         int totalSyllables = countSyllables(text);
+    //         int complexWords = countComplexWords(words);
             
-            // Calculate Flesch Reading Ease
-            double fleschScore = 206.835 - 1.015 * ((double) totalWords / totalSentences) 
-                - 84.6 * ((double) totalSyllables / totalWords);
-            metrics.put("fleschReadingEase", Math.max(0, Math.min(100, fleschScore)));
+    //         // Calculate Flesch Reading Ease
+    //         double fleschScore = 206.835 - 1.015 * ((double) totalWords / totalSentences) 
+    //             - 84.6 * ((double) totalSyllables / totalWords);
+    //         metrics.put("fleschReadingEase", Math.max(0, Math.min(100, fleschScore)));
             
-            // Calculate Gunning Fog Index
-            double gunningFog = 0.4 * (((double) totalWords / totalSentences) + 100 * ((double) complexWords / totalWords));
-            metrics.put("gunningFogIndex", gunningFog);
+    //         // Calculate Gunning Fog Index
+    //         double gunningFog = 0.4 * (((double) totalWords / totalSentences) + 100 * ((double) complexWords / totalWords));
+    //         metrics.put("gunningFogIndex", gunningFog);
             
-            // Calculate average sentence length
-            double avgSentenceLength = (double) totalWords / totalSentences;
-            metrics.put("averageSentenceLength", avgSentenceLength);
+    //         // Calculate average sentence length
+    //         double avgSentenceLength = (double) totalWords / totalSentences;
+    //         metrics.put("averageSentenceLength", avgSentenceLength);
             
-            // Calculate average syllables per word
-            double avgSyllablesPerWord = (double) totalSyllables / totalWords;
-            metrics.put("averageSyllablesPerWord", avgSyllablesPerWord);
+    //         // Calculate average syllables per word
+    //         double avgSyllablesPerWord = (double) totalSyllables / totalWords;
+    //         metrics.put("averageSyllablesPerWord", avgSyllablesPerWord);
             
-            // Calculate percentage of complex words
-            double complexWordPercentage = (double) complexWords / totalWords * 100;
-            metrics.put("complexWordPercentage", complexWordPercentage);
+    //         // Calculate percentage of complex words
+    //         double complexWordPercentage = (double) complexWords / totalWords * 100;
+    //         metrics.put("complexWordPercentage", complexWordPercentage);
             
-            return metrics;
-        } catch (Exception e) {
-            log.error("Error calculating readability metrics", e);
-            metrics.put("error", -1.0);
-            return metrics;
-        }
-    }
+    //         return metrics;
+    //     } catch (Exception e) {
+    //         log.error("Error calculating readability metrics", e);
+    //         metrics.put("error", -1.0);
+    //         return metrics;
+    //     }
+    // }
 
     private int countSyllables(String text) {
         int count = 0;
@@ -1524,14 +1591,18 @@ if (trendingTopicsMap != null && !trendingTopicsMap.isEmpty()) {
             // 3. Optimize Keywords if needed
             if (keywordMetrics != null) {
                 double keywordDensity = ((Number) keywordMetrics.get("keyword_density")).doubleValue();
-                double naturalUsage = ((Number) keywordMetrics.get("natural_usage")).doubleValue();
-
-                if (keywordDensity < 0.01 || keywordDensity > 0.05 || naturalUsage < 0.8) {
-                    String optimizedContent = optimizeKeywords(adaptedContent.toString(), keywordMetrics);
-                    if (!optimizedContent.equals(adaptedContent.toString())) {
-                        adaptedContent = new StringBuilder(optimizedContent);
-                        contentModified = true;
-                    }
+                
+                if (keywordDensity < 0.01) {
+                    // Add more keywords naturally
+                    content = increaseKeywordDensity(adaptedContent.toString(), keywordMetrics);
+                } else if (keywordDensity > 0.05) {
+                    // Reduce keyword density
+                    content = reduceKeywordDensity(adaptedContent.toString(), keywordMetrics);
+                }
+                
+                if (!content.equals(adaptedContent.toString())) {
+                    adaptedContent = new StringBuilder(content);
+                    contentModified = true;
                 }
             }
 
@@ -1791,5 +1862,30 @@ if (trendingTopicsMap != null && !trendingTopicsMap.isEmpty()) {
         }
         
         return content;
+    }
+
+    /**
+     * Assesses the structure of content and returns detailed metrics about headings,
+     * paragraphs, and formatting consistency.
+     *
+     * @param text The content text to analyze
+     * @return Map containing structure metrics including:
+     *         - heading_structure (hierarchy and distribution)
+     *         - paragraph_distribution (length and flow)
+     *         - formatting_consistency (lists, emphasis, links)
+     *         - overall_structure_score
+     */
+    public Map<String, Object> assessContentStructure(String text) {
+        try {
+            if (StringUtils.isBlank(text)) {
+                log.warn("Empty content provided for structure assessment");
+                return new HashMap<>();
+            }
+            
+            return enhancedContentGenerationService.assessContentStructure(text);
+        } catch (Exception e) {
+            log.error("Error assessing content structure: {}", e.getMessage());
+            return new HashMap<>();
+        }
     }
 }
