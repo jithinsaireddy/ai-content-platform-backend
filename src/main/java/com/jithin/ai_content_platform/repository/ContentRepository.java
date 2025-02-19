@@ -63,6 +63,11 @@ public interface ContentRepository extends JpaRepository<Content, Long> {
     List<Content> findTop100ByOrderByCreatedAtDesc();
 
     /**
+ * Find content by keyword in title or content body
+ */
+List<Content> findByTitleContainingOrContentBodyContaining(String title, String contentBody);
+
+    /**
      * Find content by publish hour and day of week
      */
     @Query(value = "SELECT * FROM content WHERE EXTRACT(HOUR FROM scheduled_publish_time) = :hour AND EXTRACT(DOW FROM scheduled_publish_time) = :dayOfWeek", nativeQuery = true)
@@ -107,4 +112,5 @@ public interface ContentRepository extends JpaRepository<Content, Long> {
     Page<Content> findAll(Pageable pageable);
     Page<Content> findByCategory(String category, Pageable pageable);
     Page<Content> findByUser(User user, Pageable pageable);
+    Page<Content> findByTitleContainingIgnoreCase(String topic, Pageable pageable);
 }

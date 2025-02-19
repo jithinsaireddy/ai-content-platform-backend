@@ -12,6 +12,7 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 
+import jakarta.annotation.PostConstruct;
 import java.io.File;
 import java.io.FileWriter;
 import java.nio.file.Files;
@@ -43,6 +44,53 @@ public class EnhancedWord2VecService {
     private final Map<String, LocalDateTime> wordTimestamps = new ConcurrentHashMap<>();
     private LocalDateTime lastTrainingTime;
     private static final long TRAINING_INTERVAL = 24 * 60 * 60 * 1000; // 24 hours
+
+    @PostConstruct
+    public void init() {
+        try {
+            // Create model directory if it doesn't exist
+            File modelDir = new File(modelPath).getParentFile();
+            if (!modelDir.exists()) {
+                modelDir.mkdirs();
+                log.info("Created model directory at: {}", modelDir.getAbsolutePath());
+            }
+
+            // Initialize or load model
+            initializeModel();
+
+
+            // If no model exists, create a basic one with default data
+            if (vec == null) {
+                log.info("Creating initial Word2Vec model with default healthcare data");
+                List<String> defaultData = Arrays.asList(
+                        "king queen prince princess royal monarchy",
+                        "man woman boy girl child adult",
+                        "apple banana mango fruit orange grape",
+                        "dog cat pet animal puppy kitten",
+                        "car bus train vehicle transport road",
+                        "science physics chemistry biology research experiment",
+                        "artificial intelligence machine learning deep neural",
+                        "computer software hardware programming coding algorithm",
+                        "bank money finance investment stocks economy",
+                        "city town village urban rural population",
+                        "music song melody instrument piano guitar",
+                        "war battle soldier weapon army military",
+                        "love affection romance relationship heart emotion",
+                        "education school college university student teacher",
+                        "doctor hospital medicine treatment health nurse",
+                        "food cooking recipe kitchen meal chef",
+                        "game player sport team competition win",
+                        "earth planet space universe star galaxy",
+                        "technology innovation internet digital data cloud",
+                        "history past event civilization ancient heritage"
+                );
+                addTrainingData(defaultData);
+                trainModel(exportWordFrequenciesToFile());
+            }
+        } catch (Exception e) {
+            log.error("Error initializing Word2Vec service", e);
+        }
+    }
 
     public void initializeModel() {
         try {
@@ -211,9 +259,35 @@ public class EnhancedWord2VecService {
     }
 
     public List<String> findSimilarWords(String word, int n) {
-        if (vec == null || !vec.hasWord(word)) {
+        if (vec == null) {
+            log.warn("Word2Vec model not initialized when searching for: {}", word);
             return Collections.emptyList();
         }
+
+        // Preprocess the input word
+        word = word.toLowerCase().trim();
+        
+        // Handle multi-word phrases
+        if (word.contains(" ")) {
+            String[] words = word.split(" ");
+            Set<String> allSimilar = new HashSet<>();
+            
+            // Find similar words for each word in the phrase
+            for (String w : words) {
+                if (vec.hasWord(w)) {
+                    allSimilar.addAll(vec.wordsNearest(w, n));
+                }
+            }
+            
+            return new ArrayList<>(allSimilar);
+        }
+        
+        // Single word case
+        if (!vec.hasWord(word)) {
+            log.debug("Word not found in vocabulary: {}", word);
+            return Collections.emptyList();
+        }
+        
         return new ArrayList<>(vec.wordsNearest(word, n));
     }
 
@@ -237,4 +311,6 @@ public class EnhancedWord2VecService {
         wordTimestamps.entrySet().removeIf(entry -> entry.getValue().isBefore(cutoff));
         wordFrequencies.keySet().retainAll(wordTimestamps.keySet());
     }
+
+    
 }

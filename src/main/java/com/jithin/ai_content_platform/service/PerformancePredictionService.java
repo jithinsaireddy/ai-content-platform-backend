@@ -44,7 +44,7 @@ public class PerformancePredictionService {
         double historicalScore = analyzeHistoricalPerformance(content);
         
         // 2. Content Quality Analysis
-        double qualityScore = analyzeContentQuality(content);
+        String qualityAnalysis = analyzeContentQuality(content);
         
         // 3. Timing Analysis
         double timingScore = analyzePublishingTiming(content);
@@ -60,6 +60,7 @@ public class PerformancePredictionService {
         if (!feedbackPatterns.isEmpty()) {
             Map<String, Double> successFactors = (Map<String, Double>) feedbackPatterns.get("successFactors");
             if (successFactors != null && !successFactors.isEmpty()) {
+                double qualityScore = extractQualityScore(qualityAnalysis);
                 qualityScore = adjustScoreBasedOnFeedback(qualityScore, successFactors);
                 audienceScore = adjustAudienceScoreBasedOnFeedback(audienceScore, successFactors);
             }
@@ -67,7 +68,7 @@ public class PerformancePredictionService {
         
         // Calculate overall prediction
         double overallScore = calculateOverallScore(
-            historicalScore, qualityScore, timingScore, audienceScore
+            historicalScore, extractQualityScore(qualityAnalysis), timingScore, audienceScore
         );
         
         // Prepare detailed prediction
@@ -92,7 +93,7 @@ public class PerformancePredictionService {
             .orElse(0.0);
     }
 
-    private double analyzeContentQuality(Content content) {
+    public String analyzeContentQuality(Content content) {
         try {
             String prompt = String.format(
                 "You are a JSON response generator for content quality analysis. Analyze the content and return ONLY a JSON object.\n\n" +
@@ -132,12 +133,11 @@ public class PerformancePredictionService {
                 )
             );
 
-            String analysis = openRouterService.extractContentFromResponse(response);
-            return jsonResponseHandler.extractScore(analysis, "qualityScore", 0.5);
+            return openRouterService.extractContentFromResponse(response);
 
         } catch (Exception e) {
             log.error("Error in content quality analysis", e);
-            return 0.5; // Default score
+            return "{\"qualityScore\": 0.5, \"clarity\": 0.5, \"engagement\": 0.5, \"value\": 0.5, \"recommendations\": [\"Unable to generate recommendations due to an error\"]}";
         }
     }
 
@@ -305,7 +305,13 @@ public class PerformancePredictionService {
     private double extractQualityScore(String analysis) {
         // Parse OpenAI analysis to extract numeric score
         // This is a simplified version
-        return 0.8; // Placeholder
+        try {
+            Map<String, Object> json = objectMapper.readValue(analysis, new TypeReference<Map<String,Object>>() {});
+            return (double) json.get("qualityScore");
+        } catch (Exception e) {
+            log.error("Error extracting quality score from analysis", e);
+            return 0.5; // Default score
+        }
     }
 
     private List<String> collectUserFeedback(Content content) {

@@ -27,6 +27,8 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.ConcurrentHashMap;
 
 @RestController
 @RequestMapping("/api/content")
@@ -62,13 +64,19 @@ public class ContentController {
     private ContentStrategyService contentStrategyService;
 
     @Autowired
-    DynamicTrendWeightService dynamicTrendWeightService;
+    private DynamicTrendWeightService dynamicTrendWeightService;
 
     @Autowired
-    PerformancePredictionService performancePredictionService;
+    private PerformancePredictionService performancePredictionService;
+
+    @Autowired
+    EnhancedContentGenerationService enhancedContentGenerationService;
 
     @Autowired
     MLPredictionService mlPredictionService;
+
+    @Autowired
+    private CompetitorAnalysisService competitorAnalysisService;
 
     @Autowired
     private ObjectMapper objectMapper;
@@ -87,12 +95,10 @@ public class ContentController {
 
             User user = userRepository.findByUsername(username)
                 .orElseThrow(() -> new RuntimeException("User not found: " + username));
-                // User user = new User(); // Create a default user or mock user
-                // user.setUsername("testuser"); // Set a test username or use a real one if necessary
-        
 
+            // Generate initial content
             Content content = contentService.generateContent(request, user);
-            
+
             // Initialize metrics map if null
             if (content.getMetrics() == null) {
                 content.setMetricsMap(new HashMap<>());
@@ -122,6 +128,21 @@ public class ContentController {
                 logger.error("Error predicting performance: {}", e.getMessage());
                 metrics.put("predictedPerformance", Map.of("error", "Failed to predict performance"));
             }
+                       // Prepare response map
+                       Map<String, Object> response = new HashMap<>();
+                       response.put("content", content.getContentBody());
+                       response.put("id", content.getId());
+                       response.put("status", content.getStatus());
+                       
+                       // Include metricsMap directly in the response
+                       if (content.getMetricsMap() != null) {
+                           response.put("metricsMap", content.getMetricsMap());
+                       }
+
+                    // Include other existing metrics if needed
+            if (content.getMetrics() != null) {
+                response.put("metrics", content.getMetrics());
+            }
 
             try {
                 // Predict engagement
@@ -145,10 +166,25 @@ public class ContentController {
                 logger.error("Error analyzing sensitivity: {}", e.getMessage());
                 metrics.put("sensitivityAnalysis", Map.of("error", "Failed to analyze sensitivity"));
             }
-
+            
+            // Add content quality analysis
+           // Add content quality analysis
+           try {
+            String qualityAnalysisJson = performancePredictionService.analyzeContentQuality(content);
+            Map<String, Object> qualityAnalysis = objectMapper.readValue(qualityAnalysisJson, new TypeReference<Map<String, Object>>() {});
+            
+            enrichedContent.put("contentQualityScore", qualityAnalysis.get("qualityScore"));
+            enrichedContent.put("qualityAnalysis", qualityAnalysis);
+        } catch (Exception e) {
+            logger.warn("Could not perform detailed content quality analysis", e);
+            enrichedContent.put("contentQualityScore", 0.5);
+            enrichedContent.put("qualityAnalysis", Map.of("error", "Analysis failed"));
+        }
             // Save the updated content with all metrics
+            content.setMetricsMap(metrics);
             contentRepository.save(content);
 
+            // Cache the prediction
             // Notify the user that content generation is complete
             messagingTemplate.convertAndSendToUser(user.getUsername(), "/queue/updates", 
                 "Content generation completed with predictions and analysis.");
@@ -156,10 +192,10 @@ public class ContentController {
             return ResponseEntity.ok(enrichedContent);
         } catch (RuntimeException e) {
             return ResponseEntity.status(401)
-                .body("Authentication failed: " + e.getMessage());
+                    .body("Authentication failed: " + e.getMessage());
         } catch (Exception e) {
             return ResponseEntity.status(500)
-                .body("Failed to generate content: " + e.getMessage());
+                    .body("Failed to generate content: " + e.getMessage());
         }
     }
 

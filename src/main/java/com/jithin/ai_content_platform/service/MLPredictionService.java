@@ -450,4 +450,82 @@ private EnhancedWord2VecService word2VecService;
         return suggestions;
     }
 
+    public Map<String, Object> predictContentPerformance(Content content) {
+        try {
+            // Prepare prompt for prediction
+            StringBuilder promptBuilder = new StringBuilder();
+            promptBuilder.append("Analyze the following content and provide performance predictions:\n\n");
+            promptBuilder.append("Content Title: ").append(content.getTitle()).append("\n");
+            promptBuilder.append("Content Body: ").append(content.getContentBody()).append("\n\n");
+            
+            // Add trend data if available
+            if (content.getTrendData() != null) {
+                promptBuilder.append("Trend Analysis: ").append(content.getTrendData()).append("\n");
+            }
+            
+            // Add sentiment data if available
+            if (content.getAnalyzedSentiment() != null) {
+                promptBuilder.append("Sentiment Analysis: ").append(content.getAnalyzedSentiment()).append("\n");
+            }
+            
+            promptBuilder.append("\nProvide predictions for:\n");
+            promptBuilder.append("1. Engagement score (0-1)\n");
+            promptBuilder.append("2. Virality potential (0-1)\n");
+            promptBuilder.append("3. Relevance score (0-1)\n");
+            promptBuilder.append("4. Recommendations for improvement\n");
+            
+            // Create chat completion request
+            List<Map<String, String>> messages = new ArrayList<>();
+            messages.add(Map.of(
+                "role", "system",
+                "content", "You are an AI specialized in content performance prediction."
+            ));
+            messages.add(Map.of(
+                "role", "user",
+                "content", promptBuilder.toString()
+            ));
+            
+            // Get prediction from OpenRouter
+            Map<String, Object> response = openRouterService.createChatCompletion(
+                model,
+                messages,
+                null
+            );
+            
+            // Extract predictions from response
+            String predictionText = openRouterService.extractContentFromResponse(response);
+            Map<String, Object> predictions = jsonResponseHandler.parseAndValidateJson(
+                predictionText,
+                Map.of(
+                    "engagement", 0.0,
+                    "virality", 0.0,
+                    "relevance", 0.0,
+                    "recommendations", new ArrayList<String>()
+                )
+            );
+            
+            log.info("Generated predictions for content ID: {}", content.getId());
+            return predictions;
+            
+        } catch (Exception e) {
+            log.error("Error predicting content performance for content ID: {}", content.getId(), e);
+            throw new RuntimeException("Failed to predict content performance", e);
+        }
+    }
+    
+    private double calculateEngagement(Content content, Map<String, Object> trendData, Map<String, Object> sentimentData) {
+        double trendScore = (double) trendData.getOrDefault("relevance", 0.5);
+        double sentimentScore = (double) sentimentData.getOrDefault("overall_sentiment", 0.5);
+        return (trendScore + sentimentScore) / 2;
+    }
+    
+    private double calculateViralityScore(Content content, Map<String, Object> trendData) {
+        return (double) trendData.getOrDefault("virality", 0.0);
+    }
+    
+    private double calculateRelevanceScore(Content content, Map<String, Object> trendData, Map<String, Object> sentimentData) {
+        double trendRelevance = (double) trendData.getOrDefault("relevance", 0.5);
+        double sentimentConfidence = (double) sentimentData.getOrDefault("confidence_score", 0.5);
+        return (trendRelevance + sentimentConfidence) / 2;
+    }
 }

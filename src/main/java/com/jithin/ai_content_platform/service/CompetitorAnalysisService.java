@@ -13,6 +13,13 @@ import lombok.extern.slf4j.Slf4j;
 
 import java.util.*;
 import java.time.LocalDateTime;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.TimeUnit;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
+import java.util.Map;
+import java.util.HashMap;
 
 @Service
 @Slf4j
@@ -30,6 +37,9 @@ public class CompetitorAnalysisService {
     @Autowired
     private OpenRouterService openRouterService;
 
+    @Autowired
+    private AIRequestService aiRequestService;
+
     @Value("${openai.model}")
     private String model;
     
@@ -42,7 +52,29 @@ public class CompetitorAnalysisService {
     @Autowired
     private MLPredictionService mlPredictionService;
 
+    // Sentiment analysis cache with expiration
+    private final Map<String, Map<String, Object>> sentimentCache = new ConcurrentHashMap<>();
+    private final Map<String, Long> sentimentCacheTimestamps = new ConcurrentHashMap<>();
+    private static final long SENTIMENT_CACHE_DURATION = TimeUnit.HOURS.toMillis(4); // 4-hour cache
+
+    // Positioning analysis cache
+    private final Map<String, Map<String, Object>> positioningCache = new ConcurrentHashMap<>();
+    private final Map<String, Long> positioningCacheTimestamps = new ConcurrentHashMap<>();
+    private static final long POSITIONING_CACHE_DURATION = TimeUnit.HOURS.toMillis(4); // 4-hour cache
+
     public Map<String, Object> analyzeCompetitorContent(String industry, List<String> competitors) {
+        // Validate industry input
+        if (industry == null || industry.trim().isEmpty()) {
+            log.warn("No industry specified for competitor analysis. Using 'default' industry.");
+            industry = "default";
+        }
+
+        // Validate competitors list
+        if (competitors == null || competitors.isEmpty()) {
+            log.error("No competitors provided for industry: {}", industry);
+            return Map.of("error", "No competitors specified", "industry", industry);
+        }
+
         log.info("Analyzing competitor content for industry: {}", industry);
         
         Map<String, Object> analysis = new HashMap<>();
@@ -175,117 +207,149 @@ public class CompetitorAnalysisService {
         return gaps;
     }
 
-    private Map<String, Object> analyzeSentiment(List<String> competitors) {
-        Map<String, Object> sentiment = new HashMap<>();
+    public Map<String, Object> analyzeSentiment(List<String> competitors) {
+        // Sort competitors to ensure consistent cache key
+        List<String> sortedCompetitors = new ArrayList<>(competitors);
+        Collections.sort(sortedCompetitors);
+        String cacheKey = String.join(",", sortedCompetitors);
         
+        // Check cache with timestamp validation
+        long currentTime = System.currentTimeMillis();
+        Map<String, Object> cachedSentiment = sentimentCache.get(cacheKey);
+        Long cacheTimestamp = sentimentCacheTimestamps.get(cacheKey);
+        
+        // Return cached result if available and not expired
+        if (cachedSentiment != null && 
+            cacheTimestamp != null && 
+            (currentTime - cacheTimestamp) < SENTIMENT_CACHE_DURATION) {
+            log.info("Returning cached sentiment analysis for: {}", cacheKey);
+            return cachedSentiment;
+        }
+
+        Map<String, Object> sentiment = new HashMap<>();
         try {
+            // Prepare AI request
             String prompt = String.format(
                 "Analyze the sentiment and market positioning of the following competitors: %s. " +
                 "Provide a detailed analysis in JSON format with the following fields: " +
                 "overallSentiment (0-1), competitorSentiments (object with competitor names as keys), " +
                 "marketPerception (object), strengthsAndWeaknesses (object), recommendations (array)",
-                String.join(", ", competitors)
+                String.join(", ", sortedCompetitors)
             );
 
-            List<Map<String, String>> messages = new ArrayList<>();
-            messages.add(Map.of(
-                "role", "system",
-                "content", "You are a competitive analysis expert. Respond only in valid JSON format."
-            ));
-            messages.add(Map.of(
-                "role", "user",
-                "content", prompt
-            ));
+            List<Map<String, String>> messages = List.of(
+                Map.of("role", "system", "content", "You are a competitive sentiment analysis expert. Respond only in valid JSON."),
+                Map.of("role", "user", "content", prompt)
+            );
 
-            Map<String, Object> openAiResponse = openRouterService.createChatCompletion(
-                model,
-                messages,
+            Map<String, Object> response = openRouterService.createChatCompletion(
+                model, 
+                messages, 
                 Map.of(
-                    "temperature", 0.7,
+                    "temperature", 0.7, 
                     "max_tokens", 2000
                 )
             );
 
-            String content = openRouterService.extractContentFromResponse(openAiResponse);
-            Map<String, Object> parsedResponse = jsonResponseHandler.parseAndValidateJson(content, new HashMap<>());
-            
-            if (!parsedResponse.isEmpty()) {
-                sentiment = parsedResponse;
+            String content = openRouterService.extractContentFromResponse(response);
+            sentiment = jsonResponseHandler.parseAndValidateJson(content, new HashMap<>());
+
+            // Validate and enrich sentiment if needed
+            if (sentiment.isEmpty()) {
+                sentiment.put("error", "No sentiment data available");
             } else {
-                log.warn("Failed to parse sentiment analysis response");
-                sentiment.put("error", "Invalid response format");
+                // Add metadata to sentiment
+                sentiment.put("analyzed_at", currentTime);
+                sentiment.put("competitors", sortedCompetitors);
             }
 
+            // Cache the result with timestamp
+            sentimentCache.put(cacheKey, sentiment);
+            sentimentCacheTimestamps.put(cacheKey, currentTime);
+
+            // Cleanup old cache entries
+            cleanupSentimentCache();
+
         } catch (Exception e) {
-            log.error("Error analyzing competitor sentiment: ", e);
-            sentiment.put("error", "Failed to analyze competitor sentiment");
+            log.error("Error analyzing sentiment for competitors: {}", sortedCompetitors, e);
+            sentiment.put("error", "Failed to analyze sentiment");
+            sentiment.put("error_details", e.getMessage());
         }
 
         return sentiment;
     }
 
+    private void cleanupSentimentCache() {
+        long currentTime = System.currentTimeMillis();
+        sentimentCache.entrySet().removeIf(entry -> {
+            Long timestamp = sentimentCacheTimestamps.get(entry.getKey());
+            return timestamp == null || (currentTime - timestamp) > SENTIMENT_CACHE_DURATION;
+        });
+        sentimentCacheTimestamps.entrySet().removeIf(
+            entry -> (currentTime - entry.getValue()) > SENTIMENT_CACHE_DURATION
+        );
+    }
+
     public Map<String, Object> analyzeCompetitivePositioning(List<String> competitors, String industry) {
-        Map<String, Object> positioning = new HashMap<>();
-        
-        try {
-            String prompt = String.format(
-                "Analyze the competitive positioning of the following companies in the %s industry: %s. " +
-                "Consider market share, brand strength, product differentiation, and competitive advantages. " +
-                "Provide analysis in JSON format with the following fields: " +
-                "marketPositioning (object with competitor names as keys), competitiveAdvantages (object), " +
-                "marketShare (object), brandStrength (object), threats (array), opportunities (array)",
-                industry, String.join(", ", competitors)
-            );
-
-            List<Map<String, String>> messages = new ArrayList<>();
-            messages.add(Map.of(
-                "role", "system",
-                "content", "You are a competitive analysis expert. Respond only in valid JSON format."
-            ));
-            messages.add(Map.of(
-                "role", "user",
-                "content", prompt
-            ));
-
-            Map<String, Object> openAiResponse = openRouterService.createChatCompletion(
-                model,
-                messages,
-                Map.of(
-                    "temperature", 0.7,
-                    "max_tokens", 2000
-                )
-            );
-
-            String content = openRouterService.extractContentFromResponse(openAiResponse);
-            Map<String, Object> parsedResponse = jsonResponseHandler.parseAndValidateJson(content, new HashMap<>());
-            
-            if (!parsedResponse.isEmpty()) {
-                positioning = parsedResponse;
-            } else {
-                log.warn("Failed to parse competitive positioning response");
-                positioning.put("error", "Invalid response format");
-            }
-
-        } catch (Exception e) {
-            log.error("Error analyzing competitive positioning: ", e);
-            positioning.put("error", "Failed to analyze competitive positioning");
+        if (competitors == null || competitors.isEmpty()) {
+            log.warn("No competitors provided for analysis");
+            return Map.of("error", "No competitors provided");
         }
 
-        return positioning;
+        // Sort competitors for consistent cache key
+        List<String> sortedCompetitors = new ArrayList<>(competitors);
+        Collections.sort(sortedCompetitors);
+
+        // Create prompt
+        String prompt = String.format(
+            "Analyze the competitive positioning of the following companies in the %s industry: %s. " +
+            "Consider market share, brand strength, product differentiation, and competitive advantages. " +
+            "Provide analysis in JSON format with the following fields: " +
+            "marketPositioning (object with competitor names as keys), competitiveAdvantages (object), " +
+            "marketShare (object), brandStrength (object), threats (array), opportunities (array)",
+            industry, String.join(", ", sortedCompetitors)
+        );
+
+        // Make request through centralized service
+        Map<String, Object> analysis = aiRequestService.makeRequest(
+            "competitive_analysis",
+            prompt,
+            Map.of(
+                "industry", industry,
+                "competitors", sortedCompetitors
+            )
+        );
+
+        // Update competitor data
+        updateCompetitorData(competitors, industry, analysis);
+
+        return analysis;
     }
 
     private void updateCompetitorData(List<String> competitors, String industry, Map<String, Object> analysis) {
-        // Update competitor data in the repository with new insights
+        if (competitors == null || competitors.isEmpty()) {
+            return;
+        }
+
         competitors.forEach(competitor -> {
-            CompetitorData data = competitorDataRepository.findByCompetitorName(competitor);
-            if (data == null) {
-                data = new CompetitorData();
-                data.setCompetitorName(competitor);
-                data.setIndustry(industry);
+            try {
+                CompetitorData data = competitorDataRepository.findByCompetitorName(competitor);
+                boolean isNew = (data == null);
+
+                if (isNew) {
+                    data = new CompetitorData();
+                    data.setCompetitorName(competitor);
+                    data.setIndustry(industry);
+                }
+
+                // Save before any potential API calls
+                data.setLastAnalyzed(LocalDateTime.now());
+                competitorDataRepository.save(data);
+
+                log.info("Updated competitor data for: {}", competitor);
+            } catch (Exception e) {
+                log.error("Error updating competitor data for {}", competitor, e);
             }
-            // Update data fields
-            data.setLastAnalyzed(LocalDateTime.now());
-            competitorDataRepository.save(data);
         });
     }
 

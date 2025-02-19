@@ -11,6 +11,8 @@ import com.jithin.ai_content_platform.model.TrendData.Region;
 import com.jithin.ai_content_platform.model.TrendDirection;
 import com.jithin.ai_content_platform.model.TrendInsight;
 import com.jithin.ai_content_platform.model.TrendPattern;
+import java.time.format.DateTimeFormatter;
+import org.springframework.cache.annotation.Cacheable;
 import com.jithin.ai_content_platform.repository.ContentRepository;
 import com.jithin.ai_content_platform.repository.TrendDataRepository;
 import edu.stanford.nlp.ling.CoreAnnotations;
@@ -39,6 +41,7 @@ import org.springframework.data.domain.Pageable;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import java.util.stream.Collectors;
 
 import jakarta.annotation.PostConstruct;
 import java.io.File;
@@ -47,6 +50,7 @@ import java.time.DayOfWeek;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.util.*;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Function;
 import java.util.stream.Collectors;
@@ -88,6 +92,9 @@ public class TrendAnalysisService {
     @Value("${trend.analysis.max.items}")
     private int maxItems;
 
+    @Value("${trend.analysis.default.limit:100}")
+private int defaultLimit;
+
     private final StanfordCoreNLP pipeline;
     private Word2Vec word2Vec;
 
@@ -104,19 +111,50 @@ public class TrendAnalysisService {
     @PostConstruct
     public void init() {
         try {
-            // Initialize Word2Vec model
+            // Initialize Word2Vec model with enhanced error handling
             File modelFile = new File("word2vec.model");
             if (modelFile.exists()) {
-                word2Vec = WordVectorSerializer.readWord2VecModel(modelFile);
+                try {
+                    word2Vec = WordVectorSerializer.readWord2VecModel(modelFile);
+                    logger.info("Successfully loaded existing Word2Vec model");
+                } catch (Exception e) {
+                    logger.error("Error loading existing Word2Vec model, will attempt to retrain", e);
+                    modelFile.delete(); // Remove corrupted model
+                    initializeNewModel();
+                }
             } else {
-                // Train a new model if one doesn't exist
-                List<Content> initialContent = contentRepository.findAll();
-                String corpusFile = createTemporaryCorpus(initialContent);
-                trainWordEmbeddings(corpusFile);
+                initializeNewModel();
             }
         } catch (Exception e) {
             logger.error("Error initializing TrendAnalysisService", e);
         }
+    }
+
+    private void initializeNewModel() {
+        try {
+            // Get existing content or create sample if none exists
+            List<Content> initialContent = contentRepository.findAll();
+            if (initialContent.isEmpty()) {
+                logger.info("No existing content found, using sample data for initial model training");
+                initialContent = Collections.singletonList(createSampleContent());
+            }
+            
+            String corpusFile = createTemporaryCorpus(initialContent);
+            trainWordEmbeddings(corpusFile);
+            logger.info("Successfully trained new Word2Vec model");
+        } catch (Exception e) {
+            logger.error("Failed to initialize new Word2Vec model", e);
+        }
+    }
+
+    private Content createSampleContent() {
+        Content sample = new Content();
+        sample.setContentBody("This is a sample content for initial model training. " +
+                            "It contains various topics like AI, machine learning, technology, " +
+                            "innovation, and digital transformation to establish basic word relationships.");
+        sample.setTitle("Sample Training Content");
+        sample.setCategory("Technology");
+        return sample;
     }
 
     @Scheduled(fixedRate = 3600000) // Run every hour
@@ -151,8 +189,13 @@ public class TrendAnalysisService {
         }
     }
 
+    @Cacheable(value = "latestTrends", key = "'latest'", unless = "#result.isEmpty()")
     public List<TrendData> getLatestTrends() {
-        return trendDataRepository.findLatestTrends();
+        logger.debug("Fetching latest trends with optimization");
+        return trendDataRepository.findLatestTrendsOptimized(
+            LocalDateTime.now().minusHours(24), 
+            defaultLimit
+        );
     }
     
     public double calculateSeasonalityScore(TrendData trend) {
@@ -263,25 +306,144 @@ public class TrendAnalysisService {
                 new HashMap<>();
             
             // Calculate engagement score using all content
-            List<Content> contentList = contentRepository.findAll();
-            double engagement = calculateTrendEngagementScore(contentList);
-            
-            keywords.forEach(keyword -> {
-                Map<String, Object> trendMetrics = new HashMap<>();
-                double interest = calculateInterestScore(keyword, content.getRegion(), trendDataMap);
-                
-                trendMetrics.put("engagement", engagement);
-                trendMetrics.put("interest_over_time", interest);
-                trendMetrics.put("change", calculateChangeFromValues(engagement, interest));
-                trendMetrics.put("volatility", calculateVolatilityFromValues(Arrays.asList(engagement, interest)));
-                trendMetrics.put("direction", determineTrendDirectionByEngagementAndInterest(engagement, interest).toString());
-                
-                scores.put(keyword, trendMetrics);
-            });
+ // Calculate engagement score using paginated content
+int pageSize = 100;
+int pageNumber = 0;
+double totalEngagement = 0.0;
+long totalItems = 0;
+Page<Content> contentPage;
+
+do {
+    // Get only 100 records at a time
+    Pageable pageable = PageRequest.of(pageNumber, pageSize);
+    contentPage = contentRepository.findAll(pageable);
+    
+    // Calculate engagement for this batch
+    double batchEngagement = calculateTrendEngagementScore(contentPage.getContent());
+    
+    totalEngagement += batchEngagement * contentPage.getNumberOfElements();
+    totalItems += contentPage.getNumberOfElements();
+    
+    pageNumber++;
+} while (contentPage.hasNext() && pageNumber < 5);
+
+// Calculate average engagement
+double engagement = totalItems > 0 ? totalEngagement / totalItems : 0.0;
+
+keywords.forEach(keyword -> {
+    Map<String, Object> trendMetrics = calculateEnhancedTrendMetrics(keyword, engagement, trendDataMap, content.getRegion());
+    scores.put(keyword, trendMetrics);
+});
         } catch (Exception e) {
             logger.error("Error analyzing trend scores for content: {}", content.getId(), e);
         }
         return scores;
+    }
+
+    private List<String> getFormattedHistoricalDates(String keyword) {
+        try {
+            List<TrendData> historicalData = trendDataRepository.findByTopic(keyword);
+            return historicalData.stream()
+                .map(data -> data.getAnalysisTimestamp().format(DateTimeFormatter.ISO_DATE))
+                .collect(Collectors.toList());
+        } catch (Exception e) {
+            logger.error("Error retrieving historical dates for keyword: {}", keyword, e);
+            return new ArrayList<>();
+        }
+    }
+
+    private Map<String, Object> calculateEnhancedTrendMetrics(String keyword, double engagement, Map<String, Object> trendDataMap, String region) {
+        Map<String, Object> metrics = new HashMap<>();
+        try {
+            // Calculate base interest score with fallback mechanisms
+            double interest = calculateEnhancedInterestScore(keyword, region, trendDataMap);
+            
+            // Add base metrics
+            metrics.put("engagement", engagement);
+            metrics.put("interest_over_time", interest);
+            metrics.put("change", calculateChangeFromValues(engagement, interest));
+            metrics.put("volatility", calculateVolatilityFromValues(Arrays.asList(engagement, interest)));
+            
+            // Add enhanced metrics if historical data exists
+            List<Double> historicalValues = getHistoricalTrendValues(keyword);
+            if (!historicalValues.isEmpty()) {
+                double momentum = calculateMomentum(historicalValues);
+                double historicalVolatility = calculateVolatility(historicalValues);
+                metrics.put("momentum", momentum);
+                metrics.put("historical_volatility", historicalVolatility);
+                
+             // Inside calculateEnhancedTrendMetrics:
+// Add seasonality if we have enough data
+// Inside calculateEnhancedTrendMetrics:
+// Add seasonality if we have enough data
+List<String> dates = getFormattedHistoricalDates(keyword);
+if (dates.size() >= 30) {
+    metrics.put("seasonality", analyzeSeasonality(historicalValues, dates));
+}
+            }
+            
+            // Calculate confidence score
+                     // Calculate confidence score
+                     double volatility = Optional.ofNullable(metrics.get("volatility"))
+                     .filter(v -> v instanceof Number)
+                     .map(v -> ((Number) v).doubleValue())
+                     .orElse(0.0);
+                     
+                 double momentum = Optional.ofNullable(metrics.get("momentum"))
+                     .filter(v -> v instanceof Number)
+                     .map(v -> ((Number) v).doubleValue())
+                     .orElse(0.0);
+                     
+                 double confidence = calculateConfidenceScore(volatility, momentum);
+            
+            // Determine trend direction using enhanced logic
+            metrics.put("direction", determineTrendDirectionByEngagementAndInterest(engagement, interest).toString());
+            
+        } catch (Exception e) {
+            logger.error("Error calculating enhanced trend metrics for keyword: {}", keyword, e);
+            // Ensure we return at least basic metrics even if enhanced calculations fail
+            if (!metrics.containsKey("engagement")) metrics.put("engagement", engagement);
+            if (!metrics.containsKey("interest_over_time")) metrics.put("interest_over_time", 0.5);
+            if (!metrics.containsKey("direction")) metrics.put("direction", "NEUTRAL");
+        }
+        return metrics;
+    }
+
+    private double calculateEnhancedInterestScore(String keyword, String region, Map<String, Object> trendData) {
+        try {
+            // Try to get real-time interest data
+            Map<String, Object> googleTrends = fetchGoogleTrends(keyword, region);
+            if (googleTrends != null && !googleTrends.isEmpty()) {
+                double score = calculateBaseInterestScore(keyword, googleTrends);
+                if (score > 0.0) return score;
+            }
+            
+            // Fall back to historical data
+            if (trendData != null && !trendData.isEmpty()) {
+                double score = calculateBaseInterestScore(keyword, trendData);
+                if (score > 0.0) return score;
+            }
+            
+            // Try to estimate from related content
+            // Try to estimate from related content
+List<Content> relatedContent = contentRepository.findByCategoryAndContentType(keyword, "article");
+if (relatedContent.isEmpty()) {
+    // Try broader search
+    relatedContent = contentRepository.findByTitleContainingOrContentBodyContaining(keyword, keyword);
+}
+if (!relatedContent.isEmpty()) {
+    double score = calculateEngagementScore(relatedContent);
+    if (score > 0.0) return score;
+}
+            
+            // Last resort: return neutral score
+            logger.warn("Using fallback neutral score for keyword: {}", keyword);
+            return 0.5;
+            
+        } catch (Exception e) {
+            logger.error("Error calculating enhanced interest score for keyword: {}", keyword, e);
+            return 0.5;
+        }
     }
 
     private double calculateVolatilityFromValues(List<Double> scores) {
@@ -406,49 +568,67 @@ public class TrendAnalysisService {
 
     public void storeTrendAnalysis(Map<String, Map<String, Object>> trendScores, Map<String, Double> sentimentScores) {
         try {
-            trendScores.forEach((topic, scores) -> {
-                try {
-                    TrendData trendData = new TrendData();
-                    trendData.setAnalysisTimestamp(LocalDateTime.now());
-                    trendData.setTopic(topic);
-                    trendData.setTrendScore((Double) scores.get("trendScore"));
-                    
-                    // Properly serialize complex objects to JSON
-                    if (scores.get("trendingTopics") != null) {
-                        trendData.setTrendingTopics(objectMapper.writeValueAsString(scores.get("trendingTopics")));
-                    }
-                    
-                    // Set other fields with proper serialization
-                    if (scores.get("metrics") != null) {
-                        trendData.setMetrics(objectMapper.writeValueAsString(scores.get("metrics")));
-                    }
-                    if (scores.get("metadata") != null) {
-                        trendData.setMetadataString(objectMapper.writeValueAsString(scores.get("metadata")));
-                    }
-                    
-                    trendDataRepository.save(trendData);
-                } catch (JsonProcessingException e) {
-                    logger.error("Error serializing trend data for topic: {}", topic, e);
-                }
-            });
+            LocalDateTime now = LocalDateTime.now();
             
-            sentimentScores.forEach((category, score) -> {
-                TrendData sentimentData = new TrendData();
-                sentimentData.setAnalysisTimestamp(LocalDateTime.now());
-                sentimentData.setCategory(category);
-                sentimentData.setSentimentScore(score);
+            trendScores.forEach((topic, metrics) -> {
                 try {
-                    // Initialize empty JSON objects for required fields
-                    sentimentData.setTrendingTopics(objectMapper.writeValueAsString(new HashMap<>()));
-                    sentimentData.setMetrics(objectMapper.writeValueAsString(new HashMap<>()));
-                    trendDataRepository.save(sentimentData);
-                } catch (JsonProcessingException e) {
-                    logger.error("Error serializing sentiment data for category: {}", category, e);
+                    // Create or update trend data
+                    TrendData trendData = trendDataRepository.findLatestByTopic(topic);
+                    if (trendData == null) {
+                        trendData = new TrendData();
+                        trendData.setTopic(topic);
+                    }
+                    
+                    // Update current metrics
+                    trendData.setAnalysisTimestamp(now);
+                    trendData.setMetrics(objectMapper.writeValueAsString(metrics));
+                    
+                    // Store historical values for future analysis
+                    Map<String, List<Double>> historicalValues = trendData.getHistoricalValues() != null ?
+                        objectMapper.readValue(trendData.getHistoricalValues(), new TypeReference<Map<String, List<Double>>>() {}) :
+                        new HashMap<>();
+                    
+                    // Update historical values for each metric
+                    metrics.forEach((metricName, value) -> {
+                        if (value instanceof Number) {
+                            List<Double> values = historicalValues.computeIfAbsent(metricName, k -> new ArrayList<>());
+                            values.add(((Number) value).doubleValue());
+                            // Keep only last 90 days of data
+                            if (values.size() > 90) {
+                                values = values.subList(values.size() - 90, values.size());
+                            }
+                            historicalValues.put(metricName, values);
+                        }
+                    });
+                    
+                    trendData.setHistoricalValues(objectMapper.writeValueAsString(historicalValues));
+                    
+                    // Store dates for seasonality analysis
+                    List<String> historicalDates = trendData.getHistoricalDates() != null ?
+                        objectMapper.readValue(trendData.getHistoricalDates(), new TypeReference<List<String>>() {}) :
+                        new ArrayList<>();
+                    
+                    historicalDates.add(now.format(DateTimeFormatter.ISO_DATE));
+                    if (historicalDates.size() > 90) {
+                        historicalDates = historicalDates.subList(historicalDates.size() - 90, historicalDates.size());
+                    }
+                    
+                    trendData.setHistoricalDates(objectMapper.writeValueAsString(historicalDates));
+                    
+                    // Calculate and store aggregate sentiment if available
+                    if (sentimentScores.containsKey(topic)) {
+                        trendData.setSentimentScore(sentimentScores.get(topic));
+                    }
+                    
+                    // Save the trend data
+                    trendDataRepository.save(trendData);
+                    
+                } catch (Exception e) {
+                    logger.error("Error storing trend analysis for topic {}: {}", topic, e.getMessage());
                 }
             });
         } catch (Exception e) {
-            logger.error("Error storing trend analysis", e);
-            throw new RuntimeException("Failed to store trend analysis", e);
+            logger.error("Error in storeTrendAnalysis: {}", e.getMessage());
         }
     }
 
@@ -595,61 +775,71 @@ public class TrendAnalysisService {
                 .orElse(0.0);
     }
 
-    public List<TrendData> getAITrendingTopics() {
-        logger.info("Fetching AI-enhanced trending topics");
-        List<TrendData> trends = new ArrayList<>();
-        
-        // Collect trends from multiple sources with individual error handling
-        try {
+  public List<TrendData> getAITrendingTopics() {
+    List<TrendData> trends = new ArrayList<>();
+    
+    try {
+        // Use CompletableFuture for parallel execution
+        CompletableFuture<List<TrendData>> hackerNewsFuture = CompletableFuture.supplyAsync(() -> {
             try {
-                List<TrendData> hackerNewsTrends = webScrapingService.scrapeHackerNews();
-                if (hackerNewsTrends != null) {
-                    trends.addAll(hackerNewsTrends);
-                }
+                return webScrapingService.scrapeHackerNews();
             } catch (Exception e) {
                 logger.error("Error scraping HackerNews: {}", e.getMessage());
+                return Collections.emptyList();
             }
-            
+        });
+        
+        CompletableFuture<List<TrendData>> githubFuture = CompletableFuture.supplyAsync(() -> {
             try {
-                List<TrendData> githubTrends = webScrapingService.scrapeGitHubTrends();
-                if (githubTrends != null) {
-                    trends.addAll(githubTrends);
-                }
+                return webScrapingService.scrapeGitHubTrends();
             } catch (Exception e) {
                 logger.error("Error scraping GitHub: {}", e.getMessage());
+                return Collections.emptyList();
             }
-            
+        });
+        
+        CompletableFuture<List<TrendData>> stackOverflowFuture = CompletableFuture.supplyAsync(() -> {
             try {
-                List<TrendData> stackOverflowTrends = webScrapingService.scrapeStackOverflow();
-                if (stackOverflowTrends != null) {
-                    trends.addAll(stackOverflowTrends);
-                }
+                return webScrapingService.scrapeStackOverflow();
             } catch (Exception e) {
                 logger.error("Error scraping StackOverflow: {}", e.getMessage());
+                return Collections.emptyList();
             }
-            
-            // Enrich trends with AI analysis if available
-            if (!trends.isEmpty()) {
+        });
+
+            CompletableFuture<List<TrendData>> googleFuture = CompletableFuture.supplyAsync(() -> {
                 try {
-                    enrichTrendsWithAI(trends);
+                    return webScrapingService.scrapeGoogleTrends();
                 } catch (Exception e) {
-                    logger.error("Error enriching trends with AI: {}", e.getMessage());
+                    logger.error("Error scraping Google Trends: {}", e.getMessage());
+                    return Collections.emptyList();
                 }
-            }
-            
-            // Sort trends by score
-            trends.sort((a, b) -> Double.compare(
-                b.getTrendScore() != null ? b.getTrendScore() : 0.0,
-                a.getTrendScore() != null ? a.getTrendScore() : 0.0
-            ));
-            
-        } catch (Exception e) {
-            logger.error("Error in getAITrendingTopics: {}", e.getMessage());
-        }
+            });
+
+            CompletableFuture<List<TrendData>> twitterFuture = CompletableFuture.supplyAsync(() -> {
+                try {
+                    return webScrapingService.scrapeTwitterTrends();
+                } catch (Exception e) {
+                    logger.error("Error scraping Twitter Trends: {}", e.getMessage());
+                    return Collections.emptyList();
+                    }
+                });
         
-        return trends;
+        // Wait for all futures to complete and combine results
+        CompletableFuture.allOf(hackerNewsFuture, githubFuture, stackOverflowFuture, googleFuture, twitterFuture).join();
+        
+        trends.addAll(hackerNewsFuture.get());
+        trends.addAll(githubFuture.get());
+        trends.addAll(stackOverflowFuture.get());
+        trends.addAll(googleFuture.get());
+        trends.addAll(twitterFuture.get());
+        
+    } catch (Exception e) {
+        logger.error("Error getting AI trending topics: {}", e.getMessage());
     }
     
+    return trends;
+}   
     private void enrichTrendsWithAI(List<TrendData> trends) {
         for (TrendData trend : trends) {
             try {
@@ -785,7 +975,9 @@ public class TrendAnalysisService {
 
             // Collect historical values with validation
             try {
-                List<TrendData> historicalTrends = trendDataRepository.findByTopicOrderByAnalysisTimestampDesc(category);
+                // Changed from findByTopicOrderByAnalysisTimestampDesc to findTrendingByCategory
+                double minScore = 0.0; // Include all trends initially
+                List<TrendData> historicalTrends = trendDataRepository.findTrendingByCategory(category.toLowerCase().trim(), minScore);
                 if (!historicalTrends.isEmpty()) {
                     for (TrendData historicalTrend : historicalTrends) {
                         if (historicalTrend.getTrendScore() != null) {
@@ -833,10 +1025,10 @@ public class TrendAnalysisService {
             trendingTopicsMap.put(category, predictionData);
 
             // Set prediction data
-            trend.setTrendingTopicsMap(trendingTopicsMap);
-            trend.setTrendingTopics(String.valueOf(trendingTopicsMap));
+            
             trend.setTrendScore(avgValue);
             trend.setConfidenceScore(calculateConfidenceScore(volatility, momentum));
+            trend.setTrendingTopics("{}");
 
             categoryTrends.add(trend);
             return categoryTrends;
@@ -846,9 +1038,97 @@ public class TrendAnalysisService {
         }
     }
 
+    public double analyzeTrendSentiment(Content content) {
+        if (content == null) {
+            return 0.0;
+        }
+    
+        try {
+            // Use pagination to process content in batches
+            int pageSize = 100;
+            int pageNumber = 0;
+            double totalSentiment = 0.0;
+            long totalItems = 0;
+            
+            Page<Content> contentPage;
+            do {
+                Pageable pageable = PageRequest.of(pageNumber, pageSize);
+                contentPage = contentRepository.findAll(pageable);
+                
+                double pageSentiment = contentPage.getContent().stream()
+                    .mapToDouble(this::calculateContentSentiment)
+                    .average()
+                    .orElse(0.0);
+                    
+                totalSentiment += pageSentiment * contentPage.getNumberOfElements();
+                totalItems += contentPage.getNumberOfElements();
+                
+                pageNumber++;
+            } while (contentPage.hasNext() && pageNumber < 5); // Limit to 500 items
+            
+            return totalItems > 0 ? totalSentiment / totalItems : 0.0;
+            
+        } catch (Exception e) {
+            logger.error("Error analyzing trend sentiment: {}", e.getMessage());
+            return 0.0;
+        }
+    }
+
     public TrendData analyzeTrendSentiment(String topic) {
-        // Implement sentiment analysis for a specific trend
-        return null;
+        if (topic == null || topic.trim().isEmpty()) {
+            return null;
+        }
+    
+        try {
+            // Find content related to this topic by title
+            Pageable pageable = PageRequest.of(0, 100);  // Get first 100 records
+            Page<Content> contentPage = contentRepository.findByTitleContainingIgnoreCase(topic, pageable);
+            
+            if (!contentPage.hasContent()) {
+                logger.warn("No content found for topic: {}", topic);
+                return null;
+            }
+    
+            // Calculate average sentiment
+            double averageSentiment = contentPage.getContent().stream()
+                .mapToDouble(this::analyzeTrendSentiment)
+                .average()
+                .orElse(0.0);
+    
+            // Create and return TrendData
+            TrendData trendData = new TrendData();
+            trendData.setTopic(topic);
+            trendData.setTrendScore(averageSentiment);
+            trendData.setAnalysisTimestamp(LocalDateTime.now());
+            
+            return trendData;
+        } catch (Exception e) {
+            logger.error("Error analyzing sentiment for topic: " + topic, e);
+            return null;
+        }
+    }
+    
+    private double calculateContentSentiment(Content content) {
+        try {
+            String contentText = content.getContentBody();
+            if (contentText == null || contentText.isEmpty()) {
+                return 0.0;
+            }
+    
+            Annotation annotation = new Annotation(contentText);
+            pipeline.annotate(annotation);
+    
+            return annotation.get(CoreAnnotations.SentencesAnnotation.class).stream()
+                .mapToDouble(sentence -> {
+                    Tree tree = sentence.get(SentimentCoreAnnotations.SentimentAnnotatedTree.class);
+                    return RNNCoreAnnotations.getPredictedClass(tree);
+                })
+                .average()
+                .orElse(0.0);
+        } catch (Exception e) {
+            logger.error("Error calculating content sentiment: {}", e.getMessage());
+            return 0.0;
+        }
     }
 
     public Map<String, Object> analyzeTrendOpportunities(String keyword) {
@@ -936,12 +1216,14 @@ public class TrendAnalysisService {
                     try {
                         String metricsJson = c.getMetrics();
                         if (metricsJson != null) {
-                            Map<String, Integer> metrics = objectMapper.readValue(
+                            Map<String, Object> metrics = objectMapper.readValue(
                                 metricsJson, 
-                                new TypeReference<Map<String, Integer>>() {}
+                                new TypeReference<Map<String, Object>>() {}
                             );
-                            int total = metrics.values().stream()
-                                .mapToInt(Integer::intValue)
+                            // Extract numeric values safely
+                            double total = metrics.values().stream()
+                                .filter(v -> v instanceof Number)
+                                .mapToDouble(v -> ((Number) v).doubleValue())
                                 .sum();
                             return Math.min(1.0, total / 1000.0); // Normalize to 0-1
                         }
@@ -1429,8 +1711,11 @@ public class TrendAnalysisService {
             }
 
             // Sort trends by trend score in descending order
-            trends.sort((t1, t2) -> Double.compare(t2.getTrendScore(), t1.getTrendScore()));
-
+            trends.sort((t1, t2) -> Double.compare(
+                t2.getTrendScore() != null ? t2.getTrendScore() : 0.0,
+                t1.getTrendScore() != null ? t1.getTrendScore() : 0.0
+            ));
+            
         } catch (Exception e) {
             logger.error("Error fetching trending topics for region {}: {}", region, e.getMessage());
         }
@@ -1617,10 +1902,13 @@ public class TrendAnalysisService {
         
         // Scrape trends from different sources
         try {
+            trends.addAll(webScrapingService.scrapeGoogleTrends());
+            trends.addAll(webScrapingService.scrapeTwitterTrends());
             trends.addAll(webScrapingService.scrapeHackerNews());
             trends.addAll(webScrapingService.scrapeGitHubTrends());
             trends.addAll(webScrapingService.scrapeStackOverflow());
-            
+  
+        
             // Fallback to internal analysis if web scraping yields no results
             if (trends.isEmpty()) {
                 logger.warn("Web scraping yielded no results, falling back to internal analysis");
@@ -1744,6 +2032,8 @@ public class TrendAnalysisService {
             if (trendDataMap.containsKey("trendScore")) {
                 trendData.setTrendScore((Double) trendDataMap.get("trendScore"));
             }
+
+            setTrendMetrics(trendData, trendDataMap);
             
             // Set additional metrics
             Map<String, Object> metrics = new HashMap<>();
@@ -1764,6 +2054,33 @@ public class TrendAnalysisService {
         }
         
         return trendDataList;
+    }
+
+    private void setTrendMetrics(TrendData trendData, Map<String, Object> trendDataMap) {
+        try {
+            // First convert the complex object to JSON string
+            String jsonString = objectMapper.writeValueAsString(trendDataMap);
+            
+            // Parse it back as a Map to handle nested structures
+            Map<String, Object> parsedMap = objectMapper.readValue(jsonString, 
+                new TypeReference<Map<String, Object>>() {});
+            
+            // Extract trends data if present
+            if (parsedMap.containsKey("trends")) {
+                Map<String, Object> trends = (Map<String, Object>) parsedMap.get("trends");
+                if (trends.containsKey("momentum")) {
+                    trendData.setTrendScore(((Number) trends.get("momentum")).doubleValue());
+                }
+            }
+            
+            // Store the entire metrics JSON
+            trendData.setMetrics(jsonString);
+            
+        } catch (JsonProcessingException e) {
+            logger.error("Error parsing metrics JSON: {}", e.getMessage());
+        } catch (Exception e) {
+            logger.error("Unexpected error in setTrendMetrics: {}", e.getMessage());
+        }
     }
 
     private double calculateMomentum(List<Double> values) {
@@ -2522,20 +2839,21 @@ public class TrendAnalysisService {
      * @param keyword The keyword to get historical trend values for
      * @return List of historical trend values
      */
-    @Cacheable(value = "historicalTrends", key = "#keyword")
-    public List<Double> getHistoricalTrendValues(String keyword) {
-        if (keyword == null || keyword.trim().isEmpty()) {
-            logger.warn("Received null or empty keyword for historical trend values");
-            return Collections.singletonList(0.0);
-        }
-
-        try {
-            List<Double> trendScores = new ArrayList<>();
-            
-            // First, try to get recent trends from cache/scraping
-            List<?> scrapedData = webScrapingService.scrapeRecentSources(50);
-            
-            // Convert scraped data to TrendData objects and handle nulls
+    // @Cacheable(value = "historicalTrends", key = "#keyword")
+    // public List<Double> getHistoricalTrendValues(String keyword) {
+    //     if (keyword == null || keyword.trim().isEmpty()) {
+    //         logger.warn("Received null or empty keyword for historical trend values");
+    //         return Collections.singletonList(0.0);
+    //     }
+    @Cacheable(value = "trendScores", key = "#keyword", unless = "#result == null")
+public List<TrendData> getHistoricalTrendData(String keyword) {
+    logger.debug("Fetching historical trend values for keyword: {}", keyword);
+    List<TrendData> allTrends = new ArrayList<>();
+    
+    try {
+        // Get real-time trends from web scraping
+        List<?> scrapedData = webScrapingService.scrapeRecentSources(50);
+        if (scrapedData != null && !scrapedData.isEmpty()) {
             List<TrendData> recentTrends = scrapedData.stream()
                 .filter(Objects::nonNull)
                 .map(data -> {
@@ -2546,61 +2864,129 @@ public class TrendAnalysisService {
                             @SuppressWarnings("unchecked")
                             Map<String, Object> dataMap = (Map<String, Object>) data;
                             return convertMapToTrendData(dataMap).stream().findFirst().orElse(null);
-                        } else {
-                            logger.warn("Unexpected data type in scraped results: {}", data.getClass());
-                            return null;
                         }
+                        return null;
                     } catch (Exception e) {
                         logger.warn("Error converting trend data: {}", e.getMessage());
                         return null;
                     }
                 })
-                .filter(Objects::nonNull)
-                .collect(Collectors.toList());
-                
-            // Filter relevant trends and ensure non-null scores
-            List<TrendData> relevantRecentTrends = recentTrends.stream()
-                .filter(trend -> isRelevantToKeyword(trend, keyword))
+                .filter(trend -> trend != null && isRelevantToKeyword(trend, keyword))
                 .collect(Collectors.toList());
             
-            if (!relevantRecentTrends.isEmpty()) {
-                trendScores.addAll(relevantRecentTrends.stream()
-                    .map(TrendData::getTrendScore)
-                    .filter(Objects::nonNull)
-                    .collect(Collectors.toList()));
-            }
-            
-            // Then, get historical data from database using pagination
-            int pageSize = 100;
-            int pageNumber = 0;
-            Page<TrendData> historicalPage;
-            
-            do {
-                Pageable pageable = PageRequest.of(pageNumber, pageSize);
-                historicalPage = trendDataRepository.findByTopicOrderByAnalysisTimestampDesc(keyword, pageable);
-                
-                List<Double> pageScores = historicalPage.getContent().stream()
-                    .filter(Objects::nonNull)
-                    .map(TrendData::getTrendScore)
-                    .filter(Objects::nonNull)
-                    .collect(Collectors.toList());
-                    
-                trendScores.addAll(pageScores);
-                pageNumber++;
-            } while (historicalPage.hasNext() && pageNumber < 5); // Limit to 500 records total
-            
-            // If no valid scores were found, return a default score
-            if (trendScores.isEmpty()) {
-                logger.info("No valid trend scores found for keyword: {}, using default value", keyword);
-                return Collections.singletonList(0.0);
-            }
-            
-            return trendScores;
-        } catch (Exception e) {
-            logger.error("Error getting historical trend values for keyword: {}", keyword, e);
-            return new ArrayList<>();
+            allTrends.addAll(recentTrends);
         }
+        
+        // Get historical data from database
+        List<TrendData> dbTrends = trendDataRepository.findLatestTrendsByTopic(keyword, defaultLimit);
+        if (dbTrends != null && !dbTrends.isEmpty()) {
+            allTrends.addAll(dbTrends);
+        }
+        
+        return allTrends.isEmpty() ? Collections.emptyList() : allTrends;
+        
+    } catch (Exception e) {
+        logger.error("Error in getHistoricalTrendData for keyword: {}", keyword, e);
+        // Fallback to database-only if web scraping fails
+        return trendDataRepository.findLatestTrendsByTopic(keyword, defaultLimit);
     }
+}
+
+    //     try {
+    //         List<Double> trendScores = new ArrayList<>();
+            
+    //         // First, try to get recent trends from cache/scraping
+    //         List<?> scrapedData = webScrapingService.scrapeRecentSources(50);
+            
+    //         // Convert scraped data to TrendData objects and handle nulls
+    //         List<TrendData> recentTrends = scrapedData.stream()
+    //             .filter(Objects::nonNull)
+    //             .map(data -> {
+    //                 try {
+    //                     if (data instanceof TrendData) {
+    //                         return (TrendData) data;
+    //                     } else if (data instanceof Map) {
+    //                         @SuppressWarnings("unchecked")
+    //                         Map<String, Object> dataMap = (Map<String, Object>) data;
+    //                         return convertMapToTrendData(dataMap).stream().findFirst().orElse(null);
+    //                     } else {
+    //                         logger.warn("Unexpected data type in scraped results: {}", data.getClass());
+    //                         return null;
+    //                     }
+    //                 } catch (Exception e) {
+    //                     logger.warn("Error converting trend data: {}", e.getMessage());
+    //                     return null;
+    //                 }
+    //             })
+    //             .filter(Objects::nonNull)
+    //             .collect(Collectors.toList());
+                
+    //         // Filter relevant trends and ensure non-null scores
+    //         List<TrendData> relevantRecentTrends = recentTrends.stream()
+    //             .filter(trend -> isRelevantToKeyword(trend, keyword))
+    //             .collect(Collectors.toList());
+            
+    //         if (!relevantRecentTrends.isEmpty()) {
+    //             trendScores.addAll(relevantRecentTrends.stream()
+    //                 .map(TrendData::getTrendScore)
+    //                 .filter(Objects::nonNull)
+    //                 .collect(Collectors.toList()));
+    //         }
+            
+    //         // Then, get historical data from database using pagination
+    //         int pageSize = 100;
+    //         int pageNumber = 0;
+    //         Page<TrendData> historicalPage;
+            
+    //         do {
+    //             Pageable pageable = PageRequest.of(pageNumber, pageSize);
+    //             historicalPage = trendDataRepository.findByTopicOrderByAnalysisTimestampDesc(keyword, pageable);
+                
+    //             List<Double> pageScores = historicalPage.getContent().stream()
+    //                 .filter(Objects::nonNull)
+    //                 .map(TrendData::getTrendScore)
+    //                 .filter(Objects::nonNull)
+    //                 .collect(Collectors.toList());
+                    
+    //             trendScores.addAll(pageScores);
+    //             pageNumber++;
+    //         } while (historicalPage.hasNext() && pageNumber < 5); // Limit to 500 records total
+            
+    //         // If no valid scores were found, return a default score
+    //         if (trendScores.isEmpty()) {
+    //             logger.info("No valid trend scores found for keyword: {}, using default value", keyword);
+    //             return Collections.singletonList(0.0);
+    //         }
+            
+    //         return trendScores;
+    //     } catch (Exception e) {
+    //         logger.error("Error getting historical trend values for keyword: {}", keyword, e);
+    //         return new ArrayList<>();
+    //     }
+    // }
+
+    @Cacheable(value = "historicalTrends", key = "#keyword", condition = "#keyword != null && !#keyword.trim().isEmpty()")
+public List<Double> getHistoricalTrendValues(String keyword) {
+    if (keyword == null || keyword.trim().isEmpty()) {
+        logger.warn("Received null or empty keyword for historical trend values");
+        return Collections.singletonList(0.0);
+    }
+
+    try {
+        List<TrendData> trendDataList = getHistoricalTrendData(keyword);
+        if (trendDataList == null || trendDataList.isEmpty()) {
+            return Collections.singletonList(0.0);
+        }
+        
+        return trendDataList.stream()
+            .map(TrendData::getTrendScore)
+            .filter(Objects::nonNull)
+            .collect(Collectors.toList());
+    } catch (Exception e) {
+        logger.error("Error getting historical trend values for keyword: " + keyword, e);
+        return Collections.singletonList(0.0);
+    }
+}
 
     public boolean isRelevantToKeyword(TrendData trend, String keyword) {
         // Check if the trend topic contains the keyword

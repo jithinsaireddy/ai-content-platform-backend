@@ -148,6 +148,23 @@ public class Content {
     @JdbcTypeCode(SqlTypes.JSON)
     private String abTestResults; // Field to store A/B test results
 
+    @Column(columnDefinition = "jsonb")
+    @JdbcTypeCode(SqlTypes.JSON)
+    private String engagementPredictions;
+
+    @Column(columnDefinition = "jsonb")
+    @JdbcTypeCode(SqlTypes.JSON)
+    private String qualityScores;
+
+    @Column(name = "virality_score")
+    private Double viralityScore;
+
+    @Column(name = "audience_reach")
+    private Integer audienceReach;
+
+    @Column(name = "content_quality_score")
+    private Double contentQualityScore;
+
     private static final Logger logger = LoggerFactory.getLogger(Content.class);
     private static final ObjectMapper objectMapper = new ObjectMapper();
 

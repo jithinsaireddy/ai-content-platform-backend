@@ -45,6 +45,11 @@ public class OpenRouterService {
                 requestBody.putAll(extraBody);
             }
 
+             // Log the request for debugging
+        log.debug("OpenRouter API Request - Headers: {}", headers);
+        log.debug("OpenRouter API Request - Body: {}", objectMapper.writeValueAsString(requestBody));
+
+
             HttpEntity<Map<String, Object>> request = new HttpEntity<>(requestBody, headers);
             ResponseEntity<Map> responseEntity = restTemplate.exchange(
                 OPENROUTER_API_URL,
@@ -53,6 +58,8 @@ public class OpenRouterService {
                 Map.class
             );
 
+            log.debug("OpenRouter API Response: {}", responseEntity.getBody());
+            
             if (!responseEntity.getStatusCode().is2xxSuccessful()) {
                 throw new RuntimeException("OpenRouter API returned status code: " + responseEntity.getStatusCode());
             }
@@ -65,14 +72,47 @@ public class OpenRouterService {
     }
 
     public String extractContentFromResponse(Map<String, Object> response) {
-        if (response != null && response.containsKey("choices")) {
-            List<Map<String, Object>> choices = (List<Map<String, Object>>) response.get("choices");
-            if (!choices.isEmpty()) {
-                Map<String, Object> message = (Map<String, Object>) choices.get(0).get("message");
-                return (String) message.get("content");
+        try {
+            if (response == null) {
+                log.error("Received null response from OpenRouter API");
+                return "";
             }
+    
+            // Log the entire response for debugging
+            log.debug("Full OpenRouter API response: {}", response);
+    
+            // Check for different possible response structures
+            if (response.containsKey("choices")) {
+                List<Map<String, Object>> choices = (List<Map<String, Object>>) response.get("choices");
+                if (!choices.isEmpty()) {
+                    Map<String, Object> choice = choices.get(0);
+                    
+                    // Try different ways to extract content
+                    if (choice.containsKey("message")) {
+                        Map<String, Object> message = (Map<String, Object>) choice.get("message");
+                        Object content = message.get("content");
+                        return content != null ? content.toString() : "";
+                    }
+                    
+                    // Alternative extraction if message structure is different
+                    Object content = choice.get("content");
+                    return content != null ? content.toString() : "";
+                }
+            }
+    
+            // Additional fallback checks
+            if (response.containsKey("content")) {
+                return response.get("content").toString();
+            }
+    
+            log.error("Unable to extract content from OpenRouter API response");
+            return "";
+    
+        } catch (Exception e) {
+            log.error("Error extracting content from OpenRouter API response", e);
+            log.error("Full response details: {}", response);
+            return "";
         }
-        throw new RuntimeException("Invalid response format from OpenRouter API");
     }
 }
 

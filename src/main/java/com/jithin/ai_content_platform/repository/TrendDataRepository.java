@@ -46,6 +46,30 @@ public interface TrendDataRepository extends JpaRepository<TrendData, Long> {
     
     List<TrendData> findByTopicContainingIgnoreCase(String keyword);
     
-    @Query("SELECT t FROM TrendData t WHERE t.category = :category AND CAST(t.trendScore AS double) > :minScore")
+    @Query("SELECT t FROM TrendData t WHERE t.category = :category AND t.trendScore >= :minScore ORDER BY t.analysisTimestamp DESC")
     List<TrendData> findTrendingByCategory(@Param("category") String category, @Param("minScore") double minScore);
+    
+    @Query(value = "SELECT t.* FROM trend_data t " +
+           "WHERE t.topic = :topic " +
+           "ORDER BY t.analysis_timestamp DESC " +
+           "LIMIT :limit",
+           nativeQuery = true)
+    List<TrendData> findLatestTrendsByTopic(@Param("topic") String topic, @Param("limit") int limit);
+    
+    @Query(value = "SELECT t.* FROM trend_data t " +
+           "WHERE t.analysis_timestamp >= :cutoff " +
+           "ORDER BY t.analysis_timestamp DESC " +
+           "LIMIT :limit",
+           nativeQuery = true)
+    List<TrendData> findLatestTrendsOptimized(@Param("cutoff") LocalDateTime cutoff, @Param("limit") int limit);
+    
+    @Query(value = "SELECT t.* FROM trend_data t " +
+           "WHERE t.category = :category AND t.trend_score > :minScore " +
+           "ORDER BY t.analysis_timestamp DESC " +
+           "LIMIT :limit",
+           nativeQuery = true)
+    List<TrendData> findTrendingByCategoryOptimized(
+            @Param("category") String category, 
+            @Param("minScore") double minScore, 
+            @Param("limit") int limit);
 }

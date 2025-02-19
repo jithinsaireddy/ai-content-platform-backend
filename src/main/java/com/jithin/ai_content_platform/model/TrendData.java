@@ -42,6 +42,9 @@ public class TrendData {
     @Column(name = "topic", columnDefinition = "TEXT")
     private String topic;
     
+    @Column(name = "category", columnDefinition = "TEXT")
+    private String category;
+    
     @Column(name = "confidence_score")
     private Double confidenceScore;
     
@@ -61,9 +64,6 @@ public class TrendData {
     @Enumerated(EnumType.STRING)
     @Column(name = "region")
     private Region region;
-    
-    @Column(name = "category", columnDefinition = "TEXT")
-    private String category;
     
     @Column(name = "historical_values", columnDefinition = "TEXT")
     private String historicalValues;

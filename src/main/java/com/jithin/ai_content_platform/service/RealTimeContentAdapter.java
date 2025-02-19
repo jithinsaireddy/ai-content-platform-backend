@@ -6,9 +6,11 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 
+import jakarta.annotation.PostConstruct;
+import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Queue;
-import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.Executors;
@@ -28,42 +30,83 @@ public class RealTimeContentAdapter {
     @Autowired
     private CompetitorAnalysisService competitorAnalysisService;
     
+    @Autowired
+    private MLPredictionService mlPredictionService;
+    
     private final Queue<TrendData> recentTrends = new ConcurrentLinkedQueue<>();
     private final Map<String, Double> trendWeights = new ConcurrentHashMap<>();
-    private final ScheduledExecutorService scheduler = Executors.newScheduledThreadPool(1);
+    private final Map<String, Map<String, Object>> abTestCache = new ConcurrentHashMap<>();
+    private static final long AB_TEST_CACHE_DURATION = TimeUnit.MINUTES.toMillis(30); // Cache for 30 minutes
     
+    private Map<String, Double> relevanceScores = new ConcurrentHashMap<>();
+    private static final long RELEVANCE_CACHE_DURATION = TimeUnit.MINUTES.toMillis(30);
+    private Map<String, Long> relevanceTimestamps = new ConcurrentHashMap<>();
+
+    @PostConstruct
     public void init() {
-        // Schedule periodic trend weight updates
-        scheduler.scheduleAtFixedRate(this::updateTrendWeights, 0, 15, TimeUnit.MINUTES);
+        // No need for continuous updates
     }
     
     public Content adaptContent(Content content, List<TrendData> newTrends) {
         try {
-            // Update recent trends
-            updateRecentTrends(newTrends);
-            
-            // Get significant trends
-            List<TrendData> significantTrends = getSignificantTrends();
-            
-            // Adapt content based on trends
-            Content adaptedContent = adaptContentToTrends(content, significantTrends);
-            
-            // Validate with A/B testing
-            Map<String, Object> testResults = abTestingService.createABTest(
-                content, 
-                List.of(adaptedContent.getContent())
-            );
-            
-            // Only use adapted content if it's predicted to perform better
-            if (isPredictedBetter(testResults)) {
-                return adaptedContent;
+            // Update trends only if new trends are provided
+            if (newTrends != null && !newTrends.isEmpty()) {
+                updateRecentTrends(newTrends);
+                updateTrendWeights();
             }
             
+            // Check cache for A/B test results
+            String cacheKey = content.getId() != null ? content.getId().toString() : "";
+            Map<String, Object> testResults = abTestCache.get(cacheKey);
+            if (testResults == null) {
+                // Create A/B test variations only if not in cache
+                testResults = abTestingService.createABTest(
+                    content,
+                    List.of(content.getContentBody()) // Use original content as variation
+                );
+                // Cache the results
+                abTestCache.put(cacheKey, testResults);
+                
+                // Clean up old cache entries
+                cleanupCache();
+            }
+            
+            // Get ML predictions only if not already in metrics
+            Map<String, Object> metrics = content.getMetricsMap();
+            if (metrics == null) {
+                metrics = new HashMap<>();
+            }
+            
+            if (!metrics.containsKey("predictions")) {
+                Map<String, Object> predictions = mlPredictionService.predictContentPerformance(content);
+                metrics.put("predictions", predictions);
+                
+                // Update specific fields
+                if (predictions.containsKey("engagement")) {
+                    content.setEngagement((Double) predictions.get("engagement"));
+                }
+                if (predictions.containsKey("virality")) {
+                    metrics.put("virality_score", predictions.get("virality"));
+                }
+            }
+            
+            // Add test results to metrics
+            metrics.put("ab_test_results", testResults);
+            content.setMetricsMap(metrics);
+            
+            log.info("Content adapted with predictions for ID: {}", content.getId());
             return content;
+            
         } catch (Exception e) {
-            log.error("Error adapting content in real-time", e);
-            return content;
+            log.error("Error adapting content in real-time for ID: {}", content.getId(), e);
+            return content; // Return original content if adaptation fails
         }
+    }
+    
+    private void cleanupCache() {
+        long now = System.currentTimeMillis();
+        abTestCache.entrySet().removeIf(entry -> 
+            now - entry.getValue().getOrDefault("timestamp", now).hashCode() > AB_TEST_CACHE_DURATION);
     }
     
     private void updateRecentTrends(List<TrendData> newTrends) {
@@ -98,13 +141,48 @@ public class RealTimeContentAdapter {
     }
     
     private double calculateRelevance(TrendData trend) {
-        // Use competitor analysis to determine relevance
+        String cacheKey = trend.getIndustry() + ":" + trend.getTopic();
+        long currentTime = System.currentTimeMillis();
+        
+        // Check cache
+        Double cachedScore = relevanceScores.get(cacheKey);
+        Long timestamp = relevanceTimestamps.get(cacheKey);
+        
+        if (cachedScore != null && timestamp != null && 
+            (currentTime - timestamp) < RELEVANCE_CACHE_DURATION) {
+            return cachedScore;
+        }
+        
         try {
-            Map<String, Object> competitorInsights = competitorAnalysisService
-                .analyzeCompetitorContent(trend.getIndustry(), List.of(trend.getTopic()));
-            return (double) competitorInsights.getOrDefault("relevanceScore", 0.5);
+            // Batch process trends for the same industry
+            List<TrendData> trendsToProcess = recentTrends.stream()
+                .filter(t -> t.getIndustry().equals(trend.getIndustry()))
+                .filter(t -> !relevanceScores.containsKey(t.getIndustry() + ":" + t.getTopic()) ||
+                           currentTime - relevanceTimestamps.getOrDefault(
+                               t.getIndustry() + ":" + t.getTopic(), 0L) > RELEVANCE_CACHE_DURATION)
+                .toList();
+            
+            if (!trendsToProcess.isEmpty()) {
+                Map<String, Object> batchInsights = competitorAnalysisService.analyzeCompetitorContent(
+                    trend.getIndustry(),
+                    trendsToProcess.stream().map(TrendData::getTopic).toList()
+                );
+                
+                // Cache all results
+                if (batchInsights.containsKey("relevanceScores")) {
+                    @SuppressWarnings("unchecked")
+                    Map<String, Double> scores = (Map<String, Double>) batchInsights.get("relevanceScores");
+                    scores.forEach((topic, score) -> {
+                        String key = trend.getIndustry() + ":" + topic;
+                        relevanceScores.put(key, score);
+                        relevanceTimestamps.put(key, currentTime);
+                    });
+                }
+            }
+            
+            return relevanceScores.getOrDefault(cacheKey, 0.5);
         } catch (Exception e) {
-            log.error("Error calculating relevance", e);
+            log.error("Error calculating relevance for trend: {}", trend.getTopic(), e);
             return 0.5;
         }
     }

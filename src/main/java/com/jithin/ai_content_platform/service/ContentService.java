@@ -6,11 +6,11 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.jithin.ai_content_platform.exception.UserNotFoundException;
 import com.jithin.ai_content_platform.model.CommunityModel;
 import com.jithin.ai_content_platform.model.Content;
+import com.jithin.ai_content_platform.model.TrendData;
 import com.jithin.ai_content_platform.model.User;
 import com.jithin.ai_content_platform.payload.ContentRequest;
 import com.jithin.ai_content_platform.repository.CommunityModelRepository;
 import com.jithin.ai_content_platform.repository.ContentRepository;
-
 
 import edu.stanford.nlp.pipeline.Annotation;
 import edu.stanford.nlp.pipeline.StanfordCoreNLP;
@@ -33,7 +33,11 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.time.LocalDateTime;
 import java.util.*;
+import java.util.concurrent.CompletableFuture;
+import java.util.function.Function;
 import java.util.stream.Collectors;
+import java.util.regex.Pattern;
+import java.util.regex.Matcher;
 
 @Service
 @Slf4j
@@ -80,6 +84,9 @@ public class ContentService {
 
     @Autowired
     private CommunityModelRepository communityModelRepository;
+
+    @Autowired
+    private KeywordOptimizationService keywordOptimizationService;
 
     private DocumentCategorizerME categorizer;
     private LanguageDetectorME languageDetector;
@@ -156,6 +163,7 @@ public class ContentService {
                 metrics.put("likes", 0);
                 metrics.put("shares", 0);
                 metrics.put("comments", 0);
+                metrics.put("engagement", engagementMetrics != null ? ((Number) engagementMetrics.get("score")).intValue() : 0);
                 content.setMetrics(objectMapper.writeValueAsString(metrics));
                 
             } catch (Exception e) {
@@ -164,7 +172,7 @@ public class ContentService {
                 content.setAnalyzedSentimentMap(new HashMap<>());
                 content.setTrendData("{}");
                 content.setMetadata("{}");
-                content.setMetrics("{\"views\": 0, \"likes\": 0, \"shares\": 0, \"comments\": 0}");
+                content.setMetrics("{\"views\": 0, \"likes\": 0, \"shares\": 0, \"comments\": 0, \"engagement\": 0}");
                 content.setEngagement(0.0);
             }
             
@@ -351,20 +359,42 @@ public class ContentService {
 
         try {
             // Generate content using OpenAI
-            String generatedContent = generateOpenAIContent(request);
-            content.setContentBody(generatedContent);
+            Content generatedContent = generateOpenAIContent(request);
+            content.setContentBody(generatedContent.getContentBody());
+            content.setKeywords(generatedContent.getKeywords());
+            content.setRegion(generatedContent.getRegion());
+            content.setMetricsMap(generatedContent.getMetricsMap());
+
+            // Add readability and structure analysis
+            Map<String, Object> readabilityMetrics = enhancedContentGenerationService.calculateReadabilityScore(
+                generatedContent.getContentBody()
+            );
+            Map<String, Object> structureMetrics = enhancedContentGenerationService.assessContentStructure(
+                generatedContent.getContentBody()
+            );
+            
+            // Add to content metrics
+            content.getMetricsMap().put("readability", readabilityMetrics);
+            content.getMetricsMap().put("structure", structureMetrics);
 
             // Generate SEO suggestions based on the generated content
-            String seoSuggestions = generateSEOSuggestions(generatedContent);
+            String seoSuggestions = generateSEOSuggestions(generatedContent.getContentBody());
             content.setSeoSuggestions(seoSuggestions);
+
+            // Add keyword optimization analysis
+            Map<String, Object> keywordOptimization = keywordOptimizationService.analyzeKeywordOptimization(
+                generatedContent.getContentBody(),
+                generatedContent.getKeywords()
+            );
+            content.getMetricsMap().put("keyword_optimization", keywordOptimization);
 
             // Apply feedback-based improvements
             applyFeedbackBasedImprovements(content);
 
             // Create variations for A/B testing
             List<String> variations = Arrays.asList(
-                 "Engaging Headline 1: " + generatedContent,
-    "Engaging Headline 2: " + generatedContent
+                 "Engaging Headline 1: " + generatedContent.getContentBody(),
+    "Engaging Headline 2: " + generatedContent.getContentBody()
             );
             
 
@@ -373,7 +403,7 @@ public class ContentService {
             content.setAbTestResults(objectMapper.writeValueAsString(abTestResults));
 
             // Perform detailed sentiment analysis using existing service
-            Map<String, Object> sentimentAnalysis = contextAwareSentimentService.analyzeContextAwareSentiment(generatedContent);
+            Map<String, Object> sentimentAnalysis = contextAwareSentimentService.analyzeContextAwareSentiment(generatedContent.getContentBody());
             
             // Extract detailed sentiment metrics
             Map<String, Object> detailedSentiment = new HashMap<>();
@@ -389,7 +419,7 @@ public class ContentService {
             detailedSentiment.put("sentiment_distribution", sentimentDistribution);
             
             // Perform Stanford sentiment analysis
-Map<String, Object> stanfordSentiment = performStanfordSentimentAnalysis(generatedContent);
+Map<String, Object> stanfordSentiment = performStanfordSentimentAnalysis(generatedContent.getContentBody());
 if (stanfordSentiment != null && stanfordSentiment.containsKey("sentiment")) {
     String sentiment = (String) stanfordSentiment.get("sentiment");
     // Convert sentiment string to numeric value
@@ -477,6 +507,15 @@ content.setStanfordSentiment(String.valueOf(sentimentScore));
             metrics.put("analysisTimestamp", LocalDateTime.now().toString());
             content.setMetrics(objectMapper.writeValueAsString(metrics));
 
+            // Adapt content based on metrics
+            Content adaptedContent = adaptContent(content.getContentBody(), content.getMetricsMap());
+            if (adaptedContent != null) {
+                // Content was modified and improved
+                content.setContentBody(adaptedContent.getContentBody());
+                content.setMetricsMap(adaptedContent.getMetricsMap());
+                content.setStatus("ADAPTED");
+            }
+
             // Set engagement score and status
             content.setStatus("COMPLETED");
             return contentRepository.save(content);
@@ -487,35 +526,138 @@ content.setStanfordSentiment(String.valueOf(sentimentScore));
         }
     }
 
-    private String generateOpenAIContent(ContentRequest request) {
-        String prompt = String.format(
-            "Generate a %s about %s. Title: %s\n" +
-            "Writing Style: %s\n" +
-            "Emotional Tone: %s\n" +
-            "Target Audience: %s\n" +
-            "Keywords: %s\n\n" +
-            "Please generate detailed, well-structured content that incorporates the specified keywords naturally.",
-            request.getContentType(),
-            request.getTopic(),
-            request.getTitle(),
-            request.getWritingStyleSample(),
-            request.getEmotionalTone(),
-            request.getTargetAudience(),
-            request.getKeywords()
-        );
+    private Content generateOpenAIContent(ContentRequest request) {
+        // Analyze sentiment first
+        Map<String, Object> sentimentAnalysis = contextAwareSentimentService.analyzeContextAwareSentiment(request.getTopic());
+        double overallSentiment = (double) sentimentAnalysis.getOrDefault("overall_sentiment", 0.5);
+
+        StringBuilder promptBuilder = new StringBuilder();
+
+        // Add content requirements
+        promptBuilder.append("Generate high-quality content with the following requirements:\n\n");
+
+        // Core content specifications
+        promptBuilder.append("Content Specifications:\n");
+        promptBuilder.append("Topic: ").append(request.getTopic()).append("\n");
+        if (request.getTitle() != null) {
+            promptBuilder.append("Title: ").append(request.getTitle()).append("\n");
+        }
+        promptBuilder.append("Type: ").append(request.getContentType()).append("\n");
+        promptBuilder.append("Emotional Tone: ").append(request.getEmotionalTone()).append("\n");
+        promptBuilder.append("Target Audience: ").append(request.getTargetAudience()).append("\n");
+        promptBuilder.append("Writing Style: ").append(request.getWritingStyleSample()).append("\n");
+        if (request.getRegion() != null && !request.getRegion().isEmpty()) {
+            promptBuilder.append("Region: ").append(request.getRegion()).append("\n");
+            promptBuilder.append("- Use region-appropriate language and cultural references\n");
+            promptBuilder.append("- Consider local trends and preferences\n");
+            promptBuilder.append("- Ensure content resonates with regional audience\n");
+        }
+        if (request.getContentLength() != null) {
+            promptBuilder.append("Content Length: ").append(request.getContentLength()).append("\n");
+        }
+
+        // Add SEO optimization if requested
+        if (request.isOptimizeForSEO()) {
+            promptBuilder.append("\nSEO Requirements:\n");
+            promptBuilder.append("- Optimize for search engines while maintaining natural flow\n");
+            promptBuilder.append("- Include relevant keywords naturally\n");
+            promptBuilder.append("- Use proper header hierarchy\n");
+        }
+
+        if (request.getKeywords() != null && !request.getKeywords().isEmpty()) {
+            promptBuilder.append("\nPrimary Keywords:\n");
+            // Convert keywords to List if it's not already
+            List<String> keywords = new ArrayList<>(Arrays.asList(request.getKeywords().split(",\\s*")));
+            keywords.forEach(keyword ->
+                promptBuilder.append("* ").append(keyword.trim()).append("\n")
+            );
+        }
+
+        List<String> expandedKeywords = trendAnalysisService.findRelatedKeywords(request.getTopic());
+        if (!expandedKeywords.isEmpty()) {
+            promptBuilder.append("\nTrending Keywords (incorporate naturally):\n");
+            expandedKeywords.stream()
+                .limit(5)
+                .forEach(keyword -> promptBuilder.append("* ").append(keyword).append("\n"));
+    }
+
+    // Get trending topics and their keywords
+List<TrendData> trendingTopics = trendAnalysisService.getTrendingTopics();
+if (!trendingTopics.isEmpty()) {
+    promptBuilder.append("\nTrending Topics and Keywords:\n");
+    trendingTopics.stream()
+        .limit(5)
+        .forEach(trend -> {
+            promptBuilder.append("* ").append(trend.getTopic())
+                .append(" (Score: ").append(trend.getTrendScore())
+                .append(", Region: ").append(trend.getRegion())
+                .append(")\n");
+            
+            // Add related keywords for each trend
+            Map<String, Object> flattenedTopicsMap = new HashMap<>();
+Map<String, Map<String, Object>> trendingTopicsMap = trend.getTrendingTopicsMap();
+if (trendingTopicsMap != null && !trendingTopicsMap.isEmpty()) {
+    trendingTopicsMap.forEach((keyword, dataMap) -> {
+        // Choose how you want to flatten: either use the first value or concatenate
+        flattenedTopicsMap.put(keyword, dataMap.values().iterator().next());
+    });
+    
+    flattenedTopicsMap.forEach((keyword, data) -> 
+        promptBuilder.append("  - ").append(keyword).append("\n")
+    );
+}
+        });
+}
+
+        promptBuilder.append("\nTone and Sentiment Requirements:\n");
+        promptBuilder.append("1. Maintain the specified emotional tone: ").append(request.getEmotionalTone()).append("\n");
+        promptBuilder.append("2. Focus on positive sentiment while maintaining authenticity\n");
+        promptBuilder.append("3. Emphasize high-impact topics with positive associations\n");
+        promptBuilder.append("4. Focus on ").append(getSentimentDescription(overallSentiment)).append(" sentiment\n");
+
+        // Add formatting requirements
+        promptBuilder.append("\nFormatting Requirements:\n");
+        promptBuilder.append("1. Use proper markdown formatting\n");
+        promptBuilder.append("2. Start with an engaging introduction\n");
+        promptBuilder.append("3. Use ## for main sections\n");
+        promptBuilder.append("4. Use ### for subsections\n");
+        promptBuilder.append("5. Use * for bullet points\n");
+        promptBuilder.append("6. Include a clear conclusion\n");
+        promptBuilder.append("7. Keep paragraphs concise and well-structured\n");
+        promptBuilder.append("8. Maintain consistent tone and style throughout\n");
+
+        // Add metadata-based requirements
+        if (request.getMetadata() != null && !request.getMetadata().isEmpty()) {
+            promptBuilder.append("\nAdditional Requirements:\n");
+            request.getMetadata().forEach((key, value) ->
+                promptBuilder.append("* ").append(key).append(": ").append(value).append("\n")
+            );
+        }
 
         List<Map<String, String>> messages = new ArrayList<>();
         messages.add(Map.of(
-            "role", "system",
-            "content", "You are a professional content writer with expertise in creating engaging and informative content."
+                "role", "system",
+            "content", "You are an expert content creator specializing in producing high-quality, engaging, and well-researched content. Your response must follow this exact structure:\n\n" +
+                           "1. Content Body (in markdown)\n" +
+                           "2. Keywords Section\n" +
+                           "   Each keyword must include:\n" +
+                           "   - Title: A brief description of the content or topic\n" +
+                           "   - Source: The website or platform where the content can be found\n" +
+                           "3. Region Section\n" +
+                           "   - Specify geographical relevance\n" +
+                           "4. Analysis Section\n" +
+                           "   - Research and Development implications\n" +
+                           "   - Awareness points\n" +
+                           "   - Collaboration opportunities\n\n" +
+                           "Ensure each section is clearly marked with headers and the content is engaging and SEO-optimized."
         ));
         messages.add(Map.of(
-            "role", "user",
-            "content", prompt
+                "role", "user",
+                "content", promptBuilder.toString()
         ));
 
         try {
-            int maxTokens = 4000; // Define a reasonable token limit for the response
+            int maxTokens = 10000; // Define a reasonable token limit for the response
             Map<String, Object> response = openRouterService.createChatCompletion(
                 model,
                 messages,
@@ -525,11 +667,91 @@ content.setStanfordSentiment(String.valueOf(sentimentScore));
                 )
             );
             
-            return openRouterService.extractContentFromResponse(response);
+            String generatedContent = openRouterService.extractContentFromResponse(response);
+            if (generatedContent == null || generatedContent.trim().isEmpty()) {
+                throw new RuntimeException("Failed to generate content");
+            }
+
+            // Parse the structured response
+            String[] sections = generatedContent.split("(?m)^## ");
+            String contentBody = "";
+            String keywords = "";
+            String region = "";
+            String analysis = "";
+
+            for (String section : sections) {
+                String sectionLower = section.toLowerCase().trim();
+                if (sectionLower.startsWith("keywords")) {
+                    keywords = section.substring("keywords".length()).trim();
+                } else if (sectionLower.startsWith("region")) {
+                    region = section.substring("region".length()).trim();
+                } else if (sectionLower.startsWith("analysis")) {
+                    analysis = section.substring("analysis".length()).trim();
+                } else {
+                    contentBody += section;
+                }
+            }
+
+            // Create content object with structured data
+            Content content = new Content();
+            content.setContentBody(contentBody.trim());
+            content.setKeywords(keywords);
+            content.setRegion(region);
+            
+            // Store analysis in metrics
+            Map<String, Object> metrics = new HashMap<>();
+            metrics.put("analysis", analysis);
+            content.setMetricsMap(metrics);
+            
+            return content;
         } catch (Exception e) {
             log.error("Error generating content with OpenRouter", e);
             throw new RuntimeException("Failed to generate content with OpenRouter: " + e.getMessage());
         }
+    }
+
+    private String generateSEOSuggestions(String contentText) throws JsonProcessingException {
+        Map<String, Object> seoAnalysis = new HashMap<>();
+        
+        List<Map<String, String>> messages = Arrays.asList(
+            Map.of(
+                "role", "system",
+                "content", "You are an SEO expert. Analyze content and provide suggestions in JSON format."
+            ),
+            Map.of(
+                "role", "user",
+                "content", String.format(
+                    "Analyze the following content for SEO and provide suggestions in JSON format including:\n" +
+                    "1. Keywords: List of 5-7 relevant keywords/phrases\n" +
+                    "2. Title suggestions: 3 SEO-optimized title options\n" +
+                    "3. Meta description: 2-3 meta description options (under 160 characters)\n" +
+                    "4. Content suggestions: List of improvements for better SEO\n" +
+                    "\nContent: %s", contentText)
+            )
+        );
+
+        int maxTokens = 1000; // Define a reasonable token limit for the response
+
+        Map<String, Object> response = openRouterService.createChatCompletion(
+            model,
+            messages,
+            Map.of(
+                "temperature", 0.7,
+                "max_tokens", maxTokens
+            )
+        );
+
+        String seoResponse = openRouterService.extractContentFromResponse(response);
+        
+        try {
+            // Parse the response into a Map
+            seoAnalysis = objectMapper.readValue(seoResponse, new TypeReference<Map<String, Object>>() {});
+        } catch (JsonProcessingException e) {
+            // If parsing fails, create a simple structure with the raw response
+            seoAnalysis.put("rawSuggestions", seoResponse);
+        }
+        
+        return objectMapper.writeValueAsString(seoAnalysis);
     }
 
     private void validateContentRequest(ContentRequest request) {
@@ -1196,52 +1418,378 @@ content.setStanfordSentiment(String.valueOf(sentimentScore));
         return improvements;
     }
 
+    // /**
+    //  * Generates SEO suggestions for the given content text
+    //  * @param contentText The content text to analyze for SEO optimization
+    //  * @return JSON string containing SEO suggestions and metadata
+    //  */
+    // private String generateSEOSuggestions(String contentText) throws JsonProcessingException {
+    //     Map<String, Object> seoAnalysis = new HashMap<>();
+        
+    //     List<Map<String, String>> messages = Arrays.asList(
+    //         Map.of(
+    //             "role", "system",
+    //             "content", "You are an SEO expert. Analyze content and provide suggestions in JSON format."
+    //         ),
+    //         Map.of(
+    //             "role", "user",
+    //             "content", String.format(
+    //                 "Analyze the following content for SEO and provide suggestions in JSON format including:\n" +
+    //                 "1. Keywords: List of 5-7 relevant keywords/phrases\n" +
+    //                 "2. Title suggestions: 3 SEO-optimized title options\n" +
+    //                 "3. Meta description: 2-3 meta description options (under 160 characters)\n" +
+    //                 "4. Content suggestions: List of improvements for better SEO\n" +
+    //                 "\nContent: %s", contentText)
+    //         )
+    //     );
+
+    //     int maxTokens = 1000; // Define a reasonable token limit for the response
+
+    //     Map<String, Object> response = openRouterService.createChatCompletion(
+    //         model,
+    //         messages,
+    //         Map.of(
+    //             "temperature", 0.7,
+    //             "max_tokens", maxTokens
+    //         )
+    //     );
+
+    //     String seoResponse = openRouterService.extractContentFromResponse(response);
+        
+    //     try {
+    //         // Parse the response into a Map
+    //         seoAnalysis = objectMapper.readValue(seoResponse, new TypeReference<Map<String, Object>>() {});
+    //     } catch (JsonProcessingException e) {
+    //         // If parsing fails, create a simple structure with the raw response
+    //         seoAnalysis.put("rawSuggestions", seoResponse);
+    //     }
+        
+    //     return objectMapper.writeValueAsString(seoAnalysis);
+    // }
+    
+    private String getSentimentDescription(double sentimentScore) {
+        if (sentimentScore >= 0.8) return "very positive";
+        if (sentimentScore >= 0.6) return "positive";
+        if (sentimentScore >= 0.4) return "neutral";
+        if (sentimentScore >= 0.2) return "negative";
+        return "very negative";
+    }
+
     /**
-     * Generates SEO suggestions for the given content text
-     * @param contentText The content text to analyze for SEO optimization
-     * @return JSON string containing SEO suggestions and metadata
+     * Adapts content based on various metrics and analysis results
+     * @param content Original content
+     * @param metrics Map of metrics including readability, structure, and optimization scores
+     * @return Adapted content with improvements
      */
-    private String generateSEOSuggestions(String contentText) throws JsonProcessingException {
-        Map<String, Object> seoAnalysis = new HashMap<>();
-        
-        List<Map<String, String>> messages = Arrays.asList(
-            Map.of(
-                "role", "system",
-                "content", "You are an SEO expert. Analyze content and provide suggestions in JSON format."
-            ),
-            Map.of(
-                "role", "user",
-                "content", String.format(
-                    "Analyze the following content for SEO and provide suggestions in JSON format including:\n" +
-                    "1. Keywords: List of 5-7 relevant keywords/phrases\n" +
-                    "2. Title suggestions: 3 SEO-optimized title options\n" +
-                    "3. Meta description: 2-3 meta description options (under 160 characters)\n" +
-                    "4. Content suggestions: List of improvements for better SEO\n" +
-                    "\nContent: %s", contentText)
-            )
-        );
-
-        int maxTokens = 1000; // Define a reasonable token limit for the response
-
-        Map<String, Object> response = openRouterService.createChatCompletion(
-            model,
-            messages,
-            Map.of(
-                "temperature", 0.7,
-                "max_tokens", maxTokens
-            )
-        );
-
-        String seoResponse = openRouterService.extractContentFromResponse(response);
-        
+    @Transactional
+    public Content adaptContent(String content, Map<String, Object> metrics) {
         try {
-            // Parse the response into a Map
-            seoAnalysis = objectMapper.readValue(seoResponse, new TypeReference<Map<String, Object>>() {});
-        } catch (JsonProcessingException e) {
-            // If parsing fails, create a simple structure with the raw response
-            seoAnalysis.put("rawSuggestions", seoResponse);
+            StringBuilder adaptedContent = new StringBuilder(content);
+            boolean contentModified = false;
+
+            // Get individual metric maps
+            @SuppressWarnings("unchecked")
+            Map<String, Object> readabilityMetrics = (Map<String, Object>) metrics.get("readability");
+            @SuppressWarnings("unchecked")
+            Map<String, Object> structureMetrics = (Map<String, Object>) metrics.get("structure");
+            @SuppressWarnings("unchecked")
+            Map<String, Object> keywordMetrics = (Map<String, Object>) metrics.get("keyword_optimization");
+
+            // 1. Improve Readability if needed
+            if (readabilityMetrics != null) {
+                double fleschScore = ((Number) readabilityMetrics.get("flesch_reading_ease")).doubleValue();
+                double avgSentenceLength = ((Number) readabilityMetrics.get("avg_sentence_length")).doubleValue();
+
+                if (fleschScore < 50.0 || avgSentenceLength > 25.0) {
+                    String improvedReadability = improveReadability(adaptedContent.toString(), readabilityMetrics);
+                    if (!improvedReadability.equals(adaptedContent.toString())) {
+                        adaptedContent = new StringBuilder(improvedReadability);
+                        contentModified = true;
+                    }
+                }
+            }
+
+            // 2. Improve Structure if needed
+            if (structureMetrics != null) {
+                double structureScore = ((Number) structureMetrics.get("overall_structure_score")).doubleValue();
+                if (structureScore < 0.7) {
+                    String improvedStructure = improveStructure(adaptedContent.toString(), structureMetrics);
+                    if (!improvedStructure.equals(adaptedContent.toString())) {
+                        adaptedContent = new StringBuilder(improvedStructure);
+                        contentModified = true;
+                    }
+                }
+            }
+
+            // 3. Optimize Keywords if needed
+            if (keywordMetrics != null) {
+                double keywordDensity = ((Number) keywordMetrics.get("keyword_density")).doubleValue();
+                double naturalUsage = ((Number) keywordMetrics.get("natural_usage")).doubleValue();
+
+                if (keywordDensity < 0.01 || keywordDensity > 0.05 || naturalUsage < 0.8) {
+                    String optimizedContent = optimizeKeywords(adaptedContent.toString(), keywordMetrics);
+                    if (!optimizedContent.equals(adaptedContent.toString())) {
+                        adaptedContent = new StringBuilder(optimizedContent);
+                        contentModified = true;
+                    }
+                }
+            }
+
+            // 4. If content was modified, update metrics
+            if (contentModified) {
+                String finalContent = adaptedContent.toString();
+                
+                // Recalculate metrics for modified content
+                Map<String, Object> updatedMetrics = new HashMap<>();
+                updatedMetrics.put("readability", enhancedContentGenerationService.calculateReadabilityScore(finalContent));
+                updatedMetrics.put("structure", enhancedContentGenerationService.assessContentStructure(finalContent));
+                
+                // Update existing Content object with updates
+                Content contentObj = new Content();
+                contentObj.setContentBody(finalContent);
+                contentObj.setMetricsMap(updatedMetrics);
+                contentObj.setStatus("ADAPTED");
+                
+                return contentObj;
+
+            }
+
+            // If no modifications were needed, return null
+            return null;
+
+        } catch (Exception e) {
+            log.error("Error adapting content: {}", e.getMessage(), e);
+            throw new RuntimeException("Failed to adapt content: " + e.getMessage(), e);
+        }
+    }
+
+    private String improveReadability(String content, Map<String, Object> readabilityMetrics) {
+        try {
+            double avgSentenceLength = ((Number) readabilityMetrics.get("avg_sentence_length")).doubleValue();
+            
+            // Split long sentences
+            if (avgSentenceLength > 25.0) {
+                content = splitLongSentences(content);
+            }
+            
+            // Simplify complex words
+            content = simplifyComplexWords(content);
+            
+            // Add paragraph breaks for better readability
+            content = addParagraphBreaks(content);
+            
+            return content;
+        } catch (Exception e) {
+            log.error("Error improving readability: {}", e.getMessage());
+            return content;
+        }
+    }
+
+    private String improveStructure(String content, Map<String, Object> structureMetrics) {
+        try {
+            // Fix heading hierarchy
+            if (((Number) structureMetrics.get("heading_hierarchy_score")).doubleValue() < 0.7) {
+                content = fixHeadingHierarchy(content);
+            }
+            
+            // Improve paragraph distribution
+            if (((Number) structureMetrics.get("paragraph_distribution_score")).doubleValue() < 0.7) {
+                content = improveParagraphDistribution(content);
+            }
+            
+            // Fix formatting consistency
+            if (((Number) structureMetrics.get("formatting_consistency_score")).doubleValue() < 0.8) {
+                content = fixFormattingConsistency(content);
+            }
+            
+            return content;
+        } catch (Exception e) {
+            log.error("Error improving structure: {}", e.getMessage());
+            return content;
+        }
+    }
+
+    private String optimizeKeywords(String content, Map<String, Object> keywordMetrics) {
+        try {
+            double keywordDensity = ((Number) keywordMetrics.get("keyword_density")).doubleValue();
+            
+            if (keywordDensity < 0.01) {
+                // Add more keywords naturally
+                content = increaseKeywordDensity(content, keywordMetrics);
+            } else if (keywordDensity > 0.05) {
+                // Reduce keyword density
+                content = reduceKeywordDensity(content, keywordMetrics);
+            }
+            
+            return content;
+        } catch (Exception e) {
+            log.error("Error optimizing keywords: {}", e.getMessage());
+            return content;
+        }
+    }
+
+    private String splitLongSentences(String content) {
+        String[] sentences = content.split("(?<=[.!?])\\s+");
+        StringBuilder result = new StringBuilder();
+        
+        for (String sentence : sentences) {
+            if (sentence.split("\\s+").length > 25) {
+                // Split on conjunctions or transition words
+                sentence = sentence.replaceAll("(?<=\\w)(,\\s*and\\s|,\\s*but\\s|;\\s*however\\s)", ".$1");
+            }
+            result.append(sentence).append(" ");
         }
         
-        return objectMapper.writeValueAsString(seoAnalysis);
+        return result.toString().trim();
+    }
+
+    private String simplifyComplexWords(String content) {
+        // Map of complex words to simpler alternatives
+        Map<String, String> simplifications = Map.of(
+            "utilize", "use",
+            "implement", "use",
+            "facilitate", "help",
+            "commence", "start",
+            "terminate", "end"
+            // Add more as needed
+        );
+        
+        for (Map.Entry<String, String> entry : simplifications.entrySet()) {
+            content = content.replaceAll("\\b" + entry.getKey() + "\\b", entry.getValue());
+        }
+        
+        return content;
+    }
+
+    private String addParagraphBreaks(String content) {
+        // Add paragraph breaks after every 3-5 sentences
+        String[] sentences = content.split("(?<=[.!?])\\s+");
+        StringBuilder result = new StringBuilder();
+        int sentenceCount = 0;
+        
+        for (String sentence : sentences) {
+            result.append(sentence).append(" ");
+            sentenceCount++;
+            
+            if (sentenceCount >= 4 && !sentence.trim().isEmpty()) {
+                result.append("\n\n");
+                sentenceCount = 0;
+            }
+        }
+        
+        return result.toString().trim();
+    }
+
+    private String fixHeadingHierarchy(String content) {
+        String[] lines = content.split("\n");
+        int currentLevel = 0;
+        StringBuilder result = new StringBuilder();
+        
+        for (String line : lines) {
+            if (line.startsWith("#")) {
+                int level = line.indexOf(" ");
+                if (level - currentLevel > 1) {
+                    // Fix skipped heading levels
+                    line = "#".repeat(currentLevel + 1) + line.substring(level);
+                }
+                currentLevel = level;
+            }
+            result.append(line).append("\n");
+        }
+        
+        return result.toString();
+    }
+
+    private String improveParagraphDistribution(String content) {
+        String[] paragraphs = content.split("\n\n");
+        StringBuilder result = new StringBuilder();
+        
+        for (String paragraph : paragraphs) {
+            String[] sentences = paragraph.split("(?<=[.!?])\\s+");
+            if (sentences.length > 5) {
+                // Split long paragraphs
+                for (int i = 0; i < sentences.length; i++) {
+                    result.append(sentences[i]).append(" ");
+                    if (i > 0 && i % 4 == 0 && i < sentences.length - 1) {
+                        result.append("\n\n");
+                    }
+                }
+            } else {
+                result.append(paragraph);
+            }
+            result.append("\n\n");
+        }
+        
+        return result.toString().trim();
+    }
+
+    private String fixFormattingConsistency(String content) {
+        // Standardize list markers
+        content = content.replaceAll("^\\s*[-*+]\\s+", "- ");
+        
+        // Standardize emphasis markers
+        content = content.replaceAll("__([^_]+)__", "**$1**");
+        content = content.replaceAll("_([^_]+)_", "*$1*");
+        
+        // Standardize link format
+        content = content.replaceAll("(?<!\\[)(?<!\\]\\()http[s]?://\\S+(?![\\)])", "<$0>");
+        
+        return content;
+    }
+
+    private String increaseKeywordDensity(String content, Map<String, Object> keywordMetrics) {
+        @SuppressWarnings("unchecked")
+        Map<String, Integer> frequency = (Map<String, Integer>) keywordMetrics.get("keyword_frequency");
+        if (frequency == null || frequency.isEmpty()) return content;
+        
+        // Add keywords to important positions (first paragraph, headings)
+        String[] paragraphs = content.split("\n\n");
+        if (paragraphs.length > 0) {
+            String firstParagraph = paragraphs[0];
+            for (String keyword : frequency.keySet()) {
+                if (!firstParagraph.toLowerCase().contains(keyword.toLowerCase())) {
+                    firstParagraph = "Regarding " + keyword + ", " + firstParagraph;
+                    break;
+                }
+            }
+            paragraphs[0] = firstParagraph;
+            content = String.join("\n\n", paragraphs);
+        }
+        
+        return content;
+    }
+
+    private String reduceKeywordDensity(String content, Map<String, Object> keywordMetrics) {
+        @SuppressWarnings("unchecked")
+        Map<String, Integer> frequency = (Map<String, Integer>) keywordMetrics.get("keyword_frequency");
+        if (frequency == null || frequency.isEmpty()) return content;
+        
+        // Replace some keyword occurrences with pronouns or synonyms
+        for (String keyword : frequency.keySet()) {
+            int count = frequency.get(keyword);
+            if (count > 3) {
+                // Keep only the first 3 occurrences
+                Pattern pattern = Pattern.compile("\\b" + Pattern.quote(keyword) + "\\b", Pattern.CASE_INSENSITIVE);
+                Matcher matcher = pattern.matcher(content);
+                int found = 0;
+                StringBuilder result = new StringBuilder();
+                int lastEnd = 0;
+                
+                while (matcher.find()) {
+                    found++;
+                    if (found <= 3) {
+                        result.append(content.substring(lastEnd, matcher.end()));
+                    } else {
+                        result.append(content.substring(lastEnd, matcher.start()));
+                        result.append("it"); // Simple pronoun replacement
+                    }
+                    lastEnd = matcher.end();
+                }
+                result.append(content.substring(lastEnd));
+                content = result.toString();
+            }
+        }
+        
+        return content;
     }
 }

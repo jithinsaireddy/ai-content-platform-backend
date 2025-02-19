@@ -3,8 +3,6 @@
 package com.jithin.ai_content_platform.service;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
-import java.io.IOException;
-import java.io.File;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.jithin.ai_content_platform.model.TrendData;
@@ -17,13 +15,22 @@ import org.springframework.stereotype.Service;
 import lombok.extern.slf4j.Slf4j;
 
 import org.springframework.beans.factory.annotation.Value;
+import jakarta.annotation.PostConstruct;
 import java.time.DayOfWeek;
 import java.time.LocalTime;
 import java.time.LocalDateTime;
 import java.time.DateTimeException;
 import java.time.temporal.ChronoUnit;
+import java.time.ZoneId;
 import java.util.*;
 import java.util.stream.Collectors;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
+
+import java.io.IOException;
+import java.io.File;
 
 import jakarta.annotation.PostConstruct;
 import com.jithin.ai_content_platform.exception.UnauthorizedException;
@@ -33,6 +40,8 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import com.jithin.ai_content_platform.exception.UserNotFoundException;
+import java.io.IOException;
+import java.io.File;
 
 @Service
 @Slf4j
@@ -51,7 +60,7 @@ public class ContentStrategyService {
     private ObjectMapper objectMapper;
 
     @Autowired
-    private OpenRouterService openRouterService;
+    private AIRequestService aiRequestService;
 
     @Value("${openai.model}")
     private String model;
@@ -64,6 +73,25 @@ public class ContentStrategyService {
 
     private Map<String, Double> engagementWeights;
     private Map<String, Object> performanceModel;
+
+    private final Map<String, CachedInsight> targetAudienceCache = new ConcurrentHashMap<>();
+    private final Map<String, CachedInsight> contentTypesCache = new ConcurrentHashMap<>();
+    private final Map<String, CachedInsight> trendingTopicsCache = new ConcurrentHashMap<>();
+    private static final long CACHE_DURATION = TimeUnit.MINUTES.toMillis(30); // Cache for 30 minutes
+
+    private static class CachedInsight {
+        private final Object data;
+        private final long timestamp;
+
+        public CachedInsight(Object data) {
+            this.data = data;
+            this.timestamp = System.currentTimeMillis();
+        }
+
+        public boolean isExpired() {
+            return System.currentTimeMillis() - timestamp > CACHE_DURATION;
+        }
+    }
 
     @PostConstruct
     public void init() {
@@ -81,10 +109,21 @@ public class ContentStrategyService {
             
             log.info("Successfully initialized ML model weights: {}", this.engagementWeights);
             log.info("Successfully initialized performance model: {}", this.performanceModel);
+
+            // Start cache cleanup scheduler
+            ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
+            scheduler.scheduleAtFixedRate(this::cleanupCache, CACHE_DURATION, CACHE_DURATION, TimeUnit.MILLISECONDS);
         } catch (Exception e) {
             log.error("Error parsing ML model weights, using default values", e);
             initializeDefaultWeights();
         }
+    }
+
+    private void cleanupCache() {
+        long now = System.currentTimeMillis();
+        targetAudienceCache.entrySet().removeIf(entry -> entry.getValue().isExpired());
+        contentTypesCache.entrySet().removeIf(entry -> entry.getValue().isExpired());
+        trendingTopicsCache.entrySet().removeIf(entry -> entry.getValue().isExpired());
     }
 
     public Map<String, Object> getStrategyAdvice(User user) {
@@ -152,48 +191,154 @@ public class ContentStrategyService {
         return optimizedTimes;
     }
 
-    private Map<String, Object> analyzeTargetAudienceML(User user) {
+    public Map<String, Object> analyzeTargetAudienceML(User user) {
+        String cacheKey = user.getId().toString();
+        CachedInsight cached = targetAudienceCache.get(cacheKey);
+        
+        if (cached != null && !cached.isExpired()) {
+            log.debug("Using cached target audience analysis for user: {}", user.getUsername());
+            return (Map<String, Object>) cached.data;
+        }
+
         Map<String, Object> audienceInsights = new HashMap<>();
         
-        // Get user's content and engagement data
-        List<Content> userContent = contentRepository.findByUser(user);
-        
-        // Perform audience clustering and segmentation
-        Map<String, Object> clusters = performAudienceClustering(userContent);
-        audienceInsights.put("segments", clusters);
-        
-        // Analyze audience behavior patterns
-        Map<String, Object> behaviorPatterns = analyzeAudienceBehavior(userContent);
-        audienceInsights.put("behavior", behaviorPatterns);
-        
-        // Generate personalized audience recommendations using NLP
-        String prompt = generateAudienceAnalysisPrompt(clusters, behaviorPatterns);
-        String aiRecommendations = getAIRecommendations(prompt);
-        audienceInsights.put("recommendations", aiRecommendations);
+        try {
+            // Get user's content and engagement data
+            List<Content> userContent = contentRepository.findByUser(user);
+            
+            // Perform audience clustering and segmentation
+            Map<String, Object> clusters = performAudienceClustering(userContent);
+            audienceInsights.put("segments", clusters);
+            
+            // Analyze audience behavior patterns
+            Map<String, Object> behaviorPatterns = analyzeAudienceBehavior(userContent);
+            audienceInsights.put("behavior", behaviorPatterns);
+            
+            // Make single AI request for comprehensive analysis
+            Map<String, Object> aiInsights = aiRequestService.makeRequest(
+                "audience_analysis",
+                String.format(
+                    "Analyze the following audience data and provide recommendations:\n" +
+                    "Segments: %s\n" +
+                    "Behavior Patterns: %s\n" +
+                    "Provide analysis in JSON format with fields: targetDemographics, contentPreferences, engagementPatterns, recommendations",
+                    objectMapper.writeValueAsString(clusters),
+                    objectMapper.writeValueAsString(behaviorPatterns)
+                ),
+                Map.of("userId", user.getId())
+            );
+            
+            audienceInsights.putAll(aiInsights);
+
+            // Cache the results
+            targetAudienceCache.put(cacheKey, new CachedInsight(audienceInsights));
+            
+        } catch (Exception e) {
+            log.error("Error in audience analysis", e);
+        }
         
         return audienceInsights;
     }
 
-    private Map<String, Object> recommendContentTypesML(User user) {
+    public Map<String, Object> recommendContentTypesML(User user) {
+        String cacheKey = user.getId().toString();
+        CachedInsight cached = contentTypesCache.get(cacheKey);
+        
+        if (cached != null && !cached.isExpired()) {
+            log.debug("Using cached content type recommendations for user: {}", user.getUsername());
+            return (Map<String, Object>) cached.data;
+        }
+
         Map<String, Object> recommendations = new HashMap<>();
         
-        // Get user's content performance data
-        List<Content> userContent = contentRepository.findByUser(user);
-        
-        // Analyze content type performance using ML
-        Map<String, Double> typePerformance = analyzeContentTypePerformance(userContent);
-        recommendations.put("typePerformance", typePerformance);
-        
-        // Get similar users' successful content types
-        List<String> similarUsersTypes = findSimilarUsersContentTypes(user);
-        recommendations.put("recommendedTypes", similarUsersTypes);
-        
-        // Generate AI-powered content format suggestions
-        String prompt = generateContentFormatPrompt(typePerformance, similarUsersTypes);
-        String aiSuggestions = getAIRecommendations(prompt);
-        recommendations.put("aiSuggestions", aiSuggestions);
+        try {
+            // Get user's content performance data
+            List<Content> userContent = contentRepository.findByUser(user);
+            
+            // Analyze content type performance using ML
+            Map<String, Double> typePerformance = analyzeContentTypePerformance(userContent);
+            recommendations.put("typePerformance", typePerformance);
+            
+            // Get similar users' successful content types
+            List<String> similarUsersTypes = findSimilarUsersContentTypes(user);
+            recommendations.put("recommendedTypes", similarUsersTypes);
+            
+            // Make single AI request for recommendations
+            Map<String, Object> aiInsights = aiRequestService.makeRequest(
+                "content_recommendations",
+                String.format(
+                    "Analyze content performance and provide recommendations:\n" +
+                    "Current Performance: %s\n" +
+                    "Similar Users' Types: %s\n" +
+                    "Provide recommendations in JSON format with fields: recommendedFormats, contentStrategy, optimizationTips",
+                    objectMapper.writeValueAsString(typePerformance),
+                    objectMapper.writeValueAsString(similarUsersTypes)
+                ),
+                Map.of("userId", user.getId())
+            );
+            
+            recommendations.putAll(aiInsights);
+
+            // Cache the results
+            contentTypesCache.put(cacheKey, new CachedInsight(recommendations));
+            
+        } catch (Exception e) {
+            log.error("Error in content type recommendations", e);
+        }
         
         return recommendations;
+    }
+
+    public List<String> getTrendingTopicsWithAIRelevance(User user) {
+        String cacheKey = user.getId().toString();
+        CachedInsight cached = trendingTopicsCache.get(cacheKey);
+        
+        if (cached != null && !cached.isExpired()) {
+            log.debug("Using cached trending topics for user: {}", user.getUsername());
+            return (List<String>) cached.data;
+        }
+
+        List<TrendData> trendingTopics = new ArrayList<>();
+        
+        try {
+            // Get trending topics from TrendAnalysisService
+            trendingTopics = trendAnalysisService.getAITrendingTopics();
+            
+            // Sort by base relevance first
+            List<TrendData> sortedTopics = trendingTopics.stream()
+                .sorted((t1, t2) -> Double.compare(calculateTopicRelevance(t2, user), calculateTopicRelevance(t1, user)))
+                .collect(Collectors.toList());
+            
+            // Make single AI request for relevance analysis
+            Map<String, Object> insights = aiRequestService.makeRequest(
+                "trend_analysis",
+                String.format(
+                    "Analyze these trending topics for relevance to the user's audience:\n" +
+                    "Topics: %s\n" +
+                    "User Content History: %s\n" +
+                    "Provide analysis in JSON format with fields: relevanceScores, recommendedTopics, topicInsights",
+                    objectMapper.writeValueAsString(sortedTopics),
+                    objectMapper.writeValueAsString(contentRepository.findByUser(user))
+                ),
+                Map.of("userId", user.getId())
+            );
+            
+            @SuppressWarnings("unchecked")
+            List<String> recommendedTopics = (List<String>) insights.get("recommendedTopics");
+            List<String> result = recommendedTopics != null ? recommendedTopics : 
+                sortedTopics.stream().map(TrendData::getTopic).collect(Collectors.toList());
+
+            // Cache the results
+            trendingTopicsCache.put(cacheKey, new CachedInsight(result));
+            
+            return result;
+            
+        } catch (Exception e) {
+            log.error("Error analyzing topic relevance", e);
+            return trendingTopics.stream()
+                .map(TrendData::getTopic)
+                .collect(Collectors.toList());
+        }
     }
 
     private double calculateContentEngagementML(Content content) {
@@ -235,16 +380,13 @@ public class ContentStrategyService {
                 "content", prompt
             ));
             
-            Map<String, Object> response = openRouterService.createChatCompletion(
-                model,
-                messages,
-                Map.of(
-                    "temperature", 0.7,
-                    "max_tokens", 1000
-                )
+            Map<String, Object> response = aiRequestService.makeRequest(
+                "content_recommendations",
+                prompt,
+                Map.of("userId", "default")
             );
             
-            return openRouterService.extractContentFromResponse(response);
+            return (String) response.get("content");
                 
         } catch (Exception e) {
             log.error("Error getting AI recommendations", e);
@@ -282,17 +424,6 @@ public class ContentStrategyService {
         behavior.put("interactionTimes", interactionTimes);
         
         return behavior;
-    }
-
-    private List<String> getTrendingTopicsWithAIRelevance(User user) {
-        // Get trending topics from TrendAnalysisService
-        List<TrendData> trendingTopics = trendAnalysisService.getAITrendingTopics();
-        
-        // Filter and sort by relevance to user's audience
-        return trendingTopics.stream()
-            .sorted((t1, t2) -> Double.compare(calculateTopicRelevance(t2, user), calculateTopicRelevance(t1, user)))
-            .map(TrendData::getTopic)
-            .collect(Collectors.toList());
     }
 
     private double calculateTopicRelevance(TrendData trend, User user) {
@@ -812,5 +943,32 @@ public class ContentStrategyService {
             .limit(3)
             .map(entry -> entry.getKey().toString())
             .collect(Collectors.toList());
+    }
+
+    public Map<String, Object> generateContentStrategy(String industry, List<String> competitors, String contentType) {
+        if (industry == null || industry.trim().isEmpty()) {
+            log.warn("No industry specified for strategy generation");
+            return Map.of("error", "No industry specified");
+        }
+
+        // Create prompt for strategy generation
+        String prompt = String.format(
+            "Generate a content strategy for the %s industry, considering competitors: %s. " +
+            "Focus on %s content. Include the following in JSON format: " +
+            "contentPillars (array), targetAudience (object), keyTopics (array), " +
+            "contentCalendar (object), distributionChannels (array), metrics (object)",
+            industry, String.join(", ", competitors), contentType
+        );
+
+        // Make request through centralized service
+        return aiRequestService.makeRequest(
+            "content_strategy",
+            prompt,
+            Map.of(
+                "industry", industry,
+                "competitors", competitors,
+                "contentType", contentType
+            )
+        );
     }
 }

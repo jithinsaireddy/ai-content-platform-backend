@@ -9,14 +9,29 @@ import org.springframework.security.core.userdetails.UserDetails;
 
 import java.util.Collection;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Set;
+import java.util.Map;
+
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.core.type.TypeReference;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import org.hibernate.annotations.JdbcTypeCode;
+import org.hibernate.type.SqlTypes;
 
 @Getter
 @Setter
 @Entity
 @Table(name = "users")
 public class User implements UserDetails {
+
+    private static final Logger logger = LoggerFactory.getLogger(User.class);
+    private static final ObjectMapper objectMapper = new ObjectMapper();
 
     @Id
     @GeneratedValue(strategy = GenerationType.IDENTITY)
@@ -30,6 +45,13 @@ public class User implements UserDetails {
 
     @Column(nullable = false)
     private String password;
+
+    @Column(columnDefinition = "jsonb")
+    @JdbcTypeCode(SqlTypes.JSON)
+    private String preferences = "{}";
+
+    @Column(nullable = false)
+    private String industry;
 
     @Column(columnDefinition = "TEXT")
     private String writingStyleSample;
@@ -97,6 +119,35 @@ public class User implements UserDetails {
     @Override
     public boolean isEnabled() {
         return true;
+    }
+
+    public Map<String, Object> getPreferences() {
+        try {
+            if (preferences == null || preferences.isEmpty()) {
+                return new HashMap<>();
+            }
+            return objectMapper.readValue(preferences, new TypeReference<Map<String, Object>>() {});
+        } catch (JsonProcessingException e) {
+            logger.error("Error parsing user preferences: ", e);
+            return new HashMap<>();
+        }
+    }
+
+    public void setPreferences(Map<String, Object> preferences) {
+        try {
+            this.preferences = objectMapper.writeValueAsString(preferences);
+        } catch (JsonProcessingException e) {
+            logger.error("Error setting user preferences: ", e);
+            this.preferences = "{}";
+        }
+    }
+
+    public String getIndustry() {
+        return industry;
+    }
+
+    public void setIndustry(String industry) {
+        this.industry = industry;
     }
 }
 // Additional fields for personalization
