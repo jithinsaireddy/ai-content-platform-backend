@@ -9,17 +9,21 @@ import java.time.Duration;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.ArrayList;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.annotation.JsonTypeInfo;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import java.io.Serializable;
 
 @Entity
 @Data
 @NoArgsConstructor
 @Table(name = "trend_data")
-public class TrendData {
+@JsonTypeInfo(use = JsonTypeInfo.Id.CLASS)
+public class TrendData implements Serializable {
     private static final Logger logger = LoggerFactory.getLogger(TrendData.class);
     private static final ObjectMapper objectMapper = new ObjectMapper();
     
@@ -90,8 +94,8 @@ public class TrendData {
     private Map<String, Object> seasonalityMap;
     
     @Transient
-    private List<Double> historicalValuesList;
-    
+    private HistoricalMetrics historicalMetrics;
+
     @Transient
     private List<String> historicalDatesList;
 
@@ -115,6 +119,22 @@ public class TrendData {
     
     @Transient
     private List<LocalDateTime> timestamps;
+
+    @Column(name = "related_keywords", columnDefinition = "TEXT")
+    private String relatedKeywordsString;
+
+    @Transient
+    private List<String> relatedKeywords;
+
+    @Data
+    public static class HistoricalMetrics {
+        private List<Double> engagement = new ArrayList<>();
+        private List<Double> interest_over_time = new ArrayList<>();
+        private List<Double> historical_volatility = new ArrayList<>();
+        private List<Double> confidence = new ArrayList<>();
+        private List<Double> change = new ArrayList<>();
+        private List<Double> dynamicWeight = new ArrayList<>();
+    }
 
     public Map<String, Map<String, Object>> getTrendingTopicsMap() {
         if (trendingTopicsMap == null && trendingTopics != null) {
@@ -161,24 +181,49 @@ public class TrendData {
     }
 
     public List<Double> getHistoricalValuesList() {
-        if (historicalValuesList == null && historicalValues != null) {
+        if (historicalMetrics == null && historicalValues != null) {
             try {
-                historicalValuesList = objectMapper.readValue(historicalValues, 
-                    new TypeReference<List<Double>>() {});
+                historicalMetrics = objectMapper.readValue(historicalValues, HistoricalMetrics.class);
+                // Return engagement values as the main historical values
+                return historicalMetrics.engagement;
             } catch (JsonProcessingException e) {
                 logger.error("Error deserializing historical values", e);
                 return List.of();
             }
         }
-        return historicalValuesList != null ? historicalValuesList : List.of();
+        return historicalMetrics != null ? historicalMetrics.engagement : List.of();
     }
 
     public void setHistoricalValuesList(List<Double> historicalValuesList) {
-        this.historicalValuesList = historicalValuesList;
+        if (this.historicalMetrics == null) {
+            this.historicalMetrics = new HistoricalMetrics();
+        }
+        this.historicalMetrics.engagement = historicalValuesList;
         try {
-            this.historicalValues = objectMapper.writeValueAsString(historicalValuesList);
+            this.historicalValues = objectMapper.writeValueAsString(historicalMetrics);
         } catch (JsonProcessingException e) {
             logger.error("Error serializing historical values", e);
+        }
+    }
+
+    public HistoricalMetrics getHistoricalMetrics() {
+        if (historicalMetrics == null && historicalValues != null) {
+            try {
+                historicalMetrics = objectMapper.readValue(historicalValues, HistoricalMetrics.class);
+            } catch (JsonProcessingException e) {
+                logger.error("Error deserializing historical metrics", e);
+                return new HistoricalMetrics();
+            }
+        }
+        return historicalMetrics != null ? historicalMetrics : new HistoricalMetrics();
+    }
+
+    public void setHistoricalMetrics(HistoricalMetrics metrics) {
+        this.historicalMetrics = metrics;
+        try {
+            this.historicalValues = objectMapper.writeValueAsString(metrics);
+        } catch (JsonProcessingException e) {
+            logger.error("Error serializing historical metrics", e);
         }
     }
 
@@ -352,6 +397,28 @@ public class TrendData {
 
     public String getMetrics() {
         return metrics;
+    }
+
+    public List<String> getRelatedKeywords() {
+        if (relatedKeywords == null && relatedKeywordsString != null) {
+            try {
+                relatedKeywords = objectMapper.readValue(relatedKeywordsString, 
+                    new TypeReference<List<String>>() {});
+            } catch (JsonProcessingException e) {
+                logger.error("Error deserializing related keywords", e);
+                return List.of();
+            }
+        }
+        return relatedKeywords != null ? relatedKeywords : List.of();
+    }
+
+    public void setRelatedKeywords(List<String> relatedKeywords) {
+        this.relatedKeywords = relatedKeywords;
+        try {
+            this.relatedKeywordsString = objectMapper.writeValueAsString(relatedKeywords);
+        } catch (JsonProcessingException e) {
+            logger.error("Error serializing related keywords", e);
+        }
     }
 
     public enum Region {

@@ -48,6 +48,9 @@ public class Content {
     @Column(columnDefinition = "TEXT")
     private String feedbackAnalysis;
 
+    @Column(columnDefinition = "TEXT")
+    private String keywordOptimization;
+
     @Column(nullable = false)
     private String category;
 
@@ -344,6 +347,19 @@ public class Content {
             return objectMapper.readValue(contentStructure, new TypeReference<Map<String, Object>>() {});
         } catch (JsonProcessingException e) {
             logger.error("Error parsing content structure metrics for content {}: {}", id, e.getMessage());
+            return new HashMap<>();
+        }
+    }
+
+    @JsonIgnore
+    public Map<String, Object> getKeywordOptimizationMetrics() {
+        try {
+            if (keywordOptimization == null || keywordOptimization.isEmpty()) {
+                return new HashMap<>();
+            }
+            return objectMapper.readValue(keywordOptimization, new TypeReference<Map<String, Object>>() {});
+        } catch (JsonProcessingException e) {
+            logger.error("Error parsing keyword optimization metrics for content {}: {}", id, e.getMessage());
             return new HashMap<>();
         }
     }

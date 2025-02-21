@@ -1345,41 +1345,42 @@ if (!relatedContent.isEmpty()) {
      * 4. Competitive intelligence gathering
      * 5. Sentiment-based market signals
      */
+    @Cacheable(value = "industryTrends", key = "#industry")
     public Map<String, Object> getIndustryTrends(String industry) {
         logger.info("Analyzing trends for industry: {}", industry);
         Map<String, Object> trends = new HashMap<>();
         
         try {
-            // 1. Get recent content for semantic analysis
+            // Get recent content for semantic analysis
             List<Content> recentContent = contentRepository.findContentFromLastNHours(LocalDateTime.now().minusHours(720)); // Last 30 days
 
-            // 2. Train industry-specific word embeddings
+            // Train industry-specific word embeddings
             Word2Vec industryModel = trainIndustrySpecificModel(recentContent, industry);
 
-            // 3. Extract emerging concepts using word embeddings
+            // Extract emerging concepts using word embeddings
             Map<String, Double> emergingConcepts = findEmergingConcepts(industryModel, industry);
             trends.put("emergingConcepts", emergingConcepts);
 
-            // 4. Analyze cross-industry influences
+            // Analyze cross-industry influences
             Map<String, Double> crossIndustryImpact = analyzeCrossIndustryImpact(industry, industryModel);
             trends.put("crossIndustryImpact", crossIndustryImpact);
 
-            // 5. Generate content recommendations
+            // Generate content recommendations
             Map<String, Double> contentGaps = identifyContentOpportunities(
                     recentContent,
                     industry,
                     industryModel);
             trends.put("contentOpportunities", contentGaps);
 
-            // 6. Predict trend lifecycle stages
+            // Predict trend lifecycle stages
             Map<String, String> trendLifecycles = predictTrendLifecycles(emergingConcepts);
             trends.put("trendLifecycles", trendLifecycles);
 
-            // 7. Calculate industry sentiment signals
+            // Calculate industry sentiment signals
             Map<String, Object> marketSentiment = analyzeMarketSentiment(industry, recentContent);
             trends.put("marketSentiment", marketSentiment);
 
-            // 8. Generate AI-powered recommendations
+            // Generate AI-powered recommendations
             List<String> strategicRecommendations = generateStrategicInsights(
                     emergingConcepts,
                     crossIndustryImpact,
@@ -1704,7 +1705,8 @@ if (!relatedContent.isEmpty()) {
             }
 
             // Sort trends by trend score in descending order
-            trends.sort((t1, t2) -> Double.compare(
+            trends.sort((t1, t2) -> 
+                Double.compare(
                 t2.getTrendScore() != null ? t2.getTrendScore() : 0.0,
                 t1.getTrendScore() != null ? t1.getTrendScore() : 0.0
             ));
@@ -1836,19 +1838,54 @@ if (!relatedContent.isEmpty()) {
         return 0.5; // Default neutral sentiment
     }
 
-    public List<String> findRelatedKeywords(String topic) {
-        try {
-            if (word2Vec != null) {
-                return word2Vec.wordsNearest(topic, 5).stream()
-                    .map(String::toLowerCase)
-                    .collect(Collectors.toList());
+    @Cacheable(value = "relatedKeywords", key = "#topic", unless = "#result.isEmpty()")
+public List<String> findRelatedKeywords(String topic) {
+    try {
+        // First check the database for recent related keywords
+        List<TrendData> recentTrends = trendDataRepository.findLatestTrendsByTopic(topic, 5);
+        if (!recentTrends.isEmpty()) {
+            // Get related keywords from the most recent trend data
+            TrendData latestTrend = recentTrends.get(0);
+            List<String> relatedKeywords = latestTrend.getRelatedKeywords();
+            if (!relatedKeywords.isEmpty()) {
+                return relatedKeywords;
             }
-        } catch (Exception e) {
-            logger.error("Error finding related keywords for topic {}: {}", 
-                topic, e.getMessage());
+
+            // If no related keywords found in the latest trend, try to extract from metadata
+            Map<String, Object> metadata = latestTrend.getMetadata();
+            if (metadata.containsKey("related_keywords")) {
+                @SuppressWarnings("unchecked")
+                List<String> keywordsFromMetadata = (List<String>) metadata.get("related_keywords");
+                if (keywordsFromMetadata != null && !keywordsFromMetadata.isEmpty()) {
+                    // Store these keywords in the proper field for future use
+                    latestTrend.setRelatedKeywords(keywordsFromMetadata);
+                    trendDataRepository.save(latestTrend);
+                    return keywordsFromMetadata;
+                }
+            }
         }
-        return new ArrayList<>();
+
+        // Fallback to word2vec if no recent data is available
+        if (word2Vec != null) {
+            List<String> keywords = word2Vec.wordsNearest(topic, 5).stream()
+                .map(String::toLowerCase)
+                .collect(Collectors.toList());
+            
+            // If we found keywords using word2vec, store them in a new TrendData
+            if (!keywords.isEmpty() && !recentTrends.isEmpty()) {
+                TrendData latestTrend = recentTrends.get(0);
+                latestTrend.setRelatedKeywords(keywords);
+                trendDataRepository.save(latestTrend);
+            }
+            
+            return keywords;
+        }
+    } catch (Exception e) {
+        logger.error("Error finding related keywords for topic {}: {}", 
+            topic, e.getMessage());
     }
+    return new ArrayList<>();
+}
 
     private TrendDirection determineTrendDirection(TrendData trendData) {
         List<Double> historicalValues = trendData.getHistoricalValuesList();
@@ -1877,31 +1914,51 @@ if (!relatedContent.isEmpty()) {
         double volatility = trendData.getVolatility();
         double momentum = trendData.getMomentum();
         
-        // High volatility threshold
-        boolean isHighVolatility = volatility > 0.5;
-        
-        if (momentum > 0.3) {
-            return isHighVolatility ? TrendPattern.VOLATILE_RISE : TrendPattern.STEADY_RISE;
-        } else if (momentum < -0.3) {
-            return isHighVolatility ? TrendPattern.VOLATILE_DECLINE : TrendPattern.STEADY_DECLINE;
-        } else {
+        // Pattern detection logic
+        if (momentum > 0.3 && volatility < 0.2) {
+            return TrendPattern.STEADY_RISE;
+        } else if (momentum < -0.3 && volatility < 0.2) {
+            return TrendPattern.STEADY_DECLINE;
+        } else if (volatility > 0.4) {
+            return momentum > 0 ? TrendPattern.VOLATILE_RISE : TrendPattern.VOLATILE_DECLINE;
+        } else if (Math.abs(momentum) < 0.1 && volatility < 0.15) {
             return TrendPattern.CONSOLIDATION;
+        } else if (isBreakoutPattern(historicalValues, Arrays.asList(momentum))) {
+            return TrendPattern.BREAKOUT;
+        } else if (isReversalPattern(historicalValues, Arrays.asList(momentum))) {
+            return TrendPattern.REVERSAL;
         }
+
+        return TrendPattern.UNDEFINED;
     }
 
     public List<TrendData> getTrendingTopics() {
-        logger.info("Fetching trending topics from multiple sources");
+        return getTrendingTopicsInternal();
+    }
+    
+    @SuppressWarnings("unchecked")
+    private List<TrendData> getTrendingTopicsInternal() {
+        logger.info("Fetching trending topics from database and external sources");
         List<TrendData> trends = new ArrayList<>();
         
-        // Scrape trends from different sources
         try {
+            // First check for recent trends in database (within last 24 hours)
+            LocalDateTime cutoff = LocalDateTime.now().minusHours(24);
+            List<TrendData> recentTrends = trendDataRepository.findLatestTrends(cutoff);
+            
+            if (!recentTrends.isEmpty()) {
+                logger.info("Found {} recent trends in database", recentTrends.size());
+                return recentTrends;
+            }
+            
+            // If no recent trends in database, scrape from external sources
+            logger.info("No recent trends found in database, fetching from external sources");
             trends.addAll(webScrapingService.scrapeGoogleTrends());
             trends.addAll(webScrapingService.scrapeTwitterTrends());
             trends.addAll(webScrapingService.scrapeHackerNews());
             trends.addAll(webScrapingService.scrapeGitHubTrends());
             trends.addAll(webScrapingService.scrapeStackOverflow());
   
-        
             // Fallback to internal analysis if web scraping yields no results
             if (trends.isEmpty()) {
                 logger.warn("Web scraping yielded no results, falling back to internal analysis");
@@ -1912,14 +1969,17 @@ if (!relatedContent.isEmpty()) {
                 ));
                 trends.addAll(convertMapToTrendData(trendData));
             }
+            
+            // Save new trends to database
+            if (!trends.isEmpty()) {
+                trendDataRepository.saveAll(trends);
+                logger.info("Successfully saved {} new trending topics to database", trends.size());
+            }
         } catch (Exception e) {
-            logger.error("Error fetching trends through web scraping: {}", e.getMessage());
-        }
-        
-        // Save trends to database
-        if (!trends.isEmpty()) {
-            trendDataRepository.saveAll(trends);
-            logger.info("Successfully saved {} trending topics to database", trends.size());
+            logger.error("Error fetching trending topics: {}", e.getMessage());
+            // Fallback to most recent trends in database regardless of age
+            trends = trendDataRepository.findLatestTrendsOptimized(LocalDateTime.now().minusMonths(1), 100);;
+            logger.info("Falling back to {} most recent trends from database", trends.size());
         }
 
         return trends;
@@ -2675,9 +2735,9 @@ if (!relatedContent.isEmpty()) {
                 for (String word : nearestWords) {
                     double similarity = word2Vec.similarity(topic, word);
                     if (similarity > 0.3) { // Only include strong relationships
-                        relations.put(word, similarity);
-                    }
+                    relations.put(word, similarity);
                 }
+            }
             }
         } catch (Exception e) {
             logger.error("Error analyzing topic relations for {}: {}", topic, e.getMessage());

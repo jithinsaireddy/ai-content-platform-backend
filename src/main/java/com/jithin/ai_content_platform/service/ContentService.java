@@ -12,6 +12,7 @@ import com.jithin.ai_content_platform.model.User;
 import com.jithin.ai_content_platform.payload.ContentRequest;
 import com.jithin.ai_content_platform.repository.CommunityModelRepository;
 import com.jithin.ai_content_platform.repository.ContentRepository;
+import com.jithin.ai_content_platform.repository.TrendDataRepository;
 
 import edu.stanford.nlp.pipeline.Annotation;
 import edu.stanford.nlp.pipeline.StanfordCoreNLP;
@@ -91,6 +92,12 @@ public class ContentService {
     @Autowired
     private KeywordOptimizationService keywordOptimizationService;
 
+    @Autowired
+    private EnhancedWord2VecService word2VecService;
+
+    @Autowired
+    private TrendDataRepository trendDataRepository;
+
     private DocumentCategorizerME categorizer;
     private LanguageDetectorME languageDetector;
     
@@ -137,7 +144,36 @@ content.setReadabilityScore(objectMapper.writeValueAsString(readabilityMetrics))
                 // Add trend analysis
                 Map<String, Object> trendData = trendAnalysisService.getIndustryTrends(request.getCategory());
                 if (trendData != null) {
-                    content.setTrendData(objectMapper.writeValueAsString(trendData));
+                    TrendData trendDataObj = new TrendData();
+                    trendDataObj.setCategory(request.getCategory());
+                    trendDataObj.setTopic(request.getTopic());
+                    trendDataObj.setAnalysisTimestamp(LocalDateTime.now());
+                    
+                    // Set trend metrics
+                    if (trendData.containsKey("trendScore")) {
+                        trendDataObj.setTrendScore(((Number) trendData.get("trendScore")).doubleValue());
+                    }
+                    if (trendData.containsKey("confidenceScore")) {
+                        trendDataObj.setConfidenceScore(((Number) trendData.get("confidenceScore")).doubleValue());
+                    }
+                    if (trendData.containsKey("momentum")) {
+                        trendDataObj.setMomentum(((Number) trendData.get("momentum")).doubleValue());
+                    }
+                    if (trendData.containsKey("volatility")) {
+                        trendDataObj.setVolatility(((Number) trendData.get("volatility")).doubleValue());
+                    }
+                    
+                    // Set string data
+                    trendDataObj.setTrendingTopics(objectMapper.writeValueAsString(trendData.get("trendingTopics")));
+                    trendDataObj.setSentimentDistribution(objectMapper.writeValueAsString(trendData.get("sentimentDistribution")));
+                    trendDataObj.setSeasonalityData(objectMapper.writeValueAsString(trendData.get("seasonalityData")));
+                    trendDataObj.setHistoricalValues(objectMapper.writeValueAsString(trendData.get("historicalValues")));
+                    trendDataObj.setHistoricalDates(objectMapper.writeValueAsString(trendData.get("historicalDates")));
+                    trendDataObj.setMetrics(objectMapper.writeValueAsString(trendData.get("metrics")));
+                    
+                    // Save trend data
+                    TrendData savedTrendData = trendDataRepository.save(trendDataObj);
+                    content.setTrendData(objectMapper.writeValueAsString(savedTrendData));
                 }
 
                 // Add metadata about the community model and analysis
@@ -163,12 +199,12 @@ content.setReadabilityScore(objectMapper.writeValueAsString(readabilityMetrics))
                 content.setMetadata(objectMapper.writeValueAsString(metadata));
 
                 // Initialize metrics
-                Map<String, Integer> metrics = new HashMap<>();
-                metrics.put("views", 0);
-                metrics.put("likes", 0);
-                metrics.put("shares", 0);
-                metrics.put("comments", 0);
-                metrics.put("engagement", engagementMetrics != null ? ((Number) engagementMetrics.get("score")).intValue() : 0);
+                Map<String, Number> metrics = new HashMap<>();
+                metrics.put("views", 0.0);
+                metrics.put("likes", 0.0);
+                metrics.put("shares", 0.0);
+                metrics.put("comments", 0.0);
+                metrics.put("engagement", engagementMetrics != null ? ((Number) engagementMetrics.get("score")).doubleValue() : 0.0);
                 content.setMetrics(objectMapper.writeValueAsString(metrics));
                 
             } catch (Exception e) {
@@ -177,7 +213,7 @@ content.setReadabilityScore(objectMapper.writeValueAsString(readabilityMetrics))
                 content.setAnalyzedSentimentMap(new HashMap<>());
                 content.setTrendData("{}");
                 content.setMetadata("{}");
-                content.setMetrics("{\"views\": 0, \"likes\": 0, \"shares\": 0, \"comments\": 0, \"engagement\": 0}");
+                content.setMetrics("{\"views\": 0.0, \"likes\": 0.0, \"shares\": 0.0, \"comments\": 0.0, \"engagement\": 0.0}");
                 content.setEngagement(0.0);
             }
             
@@ -395,6 +431,9 @@ content.setReadabilityScore(objectMapper.writeValueAsString(readabilityMetrics))
                 generatedContent.getKeywords()
             );
             content.getMetricsMap().put("keyword_optimization", keywordOptimization);
+            
+            // Store keyword optimization in dedicated field
+            content.setKeywordOptimization(objectMapper.writeValueAsString(keywordOptimization));
 
             // Apply feedback-based improvements
             applyFeedbackBasedImprovements(content);
@@ -462,31 +501,47 @@ try {
             .forEach(keywordsToAnalyze::add);
     }
     
-    Content limitedContent = new Content();
-    limitedContent.setTitle(content.getTitle());
-    limitedContent.setKeywords(String.join(", ", keywordsToAnalyze));
-    limitedContent.setRegion(content.getRegion());
+    // First check if we have recent trend data in the database
+    LocalDateTime cutoffTime = LocalDateTime.now().minusHours(24); // Consider data from last 24 hours as fresh
+    boolean needsFreshAnalysis = true;
     
-    Map<String, Object> trendPatterns = trendAnalysisService.analyzeTrends(Collections.singletonList(limitedContent));
-    trendData.put("trendPatterns", trendPatterns);
-    trendData.put("contentWeights", contentWeights);
-    
-    // Get historical trend data only for the title
-    if (content.getTitle() != null) {
-        List<Double> historicalValues = trendAnalysisService.getHistoricalTrendValues(content.getTitle());
-        List<LocalDateTime> historicalDates = trendAnalysisService.getHistoricalTrendDates(content.getTitle());
-        
-        Map<String, Double> interestOverTime = new HashMap<>();
-        if (historicalDates != null && !historicalDates.isEmpty() && 
-            historicalValues != null && !historicalValues.isEmpty()) {
-            for (int i = 0; i < historicalDates.size(); i++) {
-                interestOverTime.put(historicalDates.get(i).toString(), historicalValues.get(i));
-            }
-        } else {
-            // Add default current timestamp with neutral value
-            interestOverTime.put(LocalDateTime.now().toString(), 0.5);
+    for (String keyword : keywordsToAnalyze) {
+        TrendData existingTrend = trendDataRepository.findLatestByTopic(keyword);
+        if (existingTrend != null && existingTrend.getAnalysisTimestamp().isAfter(cutoffTime)) {
+            // Use existing trend data if it's fresh
+            trendData.put(keyword, objectMapper.readValue(existingTrend.getMetrics(), new TypeReference<Map<String, Object>>() {}));
+            needsFreshAnalysis = false;
         }
-        trendData.put("interestOverTime", interestOverTime);
+    }
+    
+    // Only call trend analysis API if we don't have fresh data
+    if (needsFreshAnalysis) {
+        Content limitedContent = new Content();
+        limitedContent.setTitle(content.getTitle());
+        limitedContent.setKeywords(String.join(", ", keywordsToAnalyze));
+        limitedContent.setRegion(content.getRegion());
+        
+        Map<String, Object> trendPatterns = trendAnalysisService.analyzeTrends(Collections.singletonList(limitedContent));
+        trendData.put("trendPatterns", trendPatterns);
+        trendData.put("contentWeights", contentWeights);
+        
+        // Get historical trend data only for the title
+        if (content.getTitle() != null) {
+            List<Double> historicalValues = trendAnalysisService.getHistoricalTrendValues(content.getTitle());
+            List<LocalDateTime> historicalDates = trendAnalysisService.getHistoricalTrendDates(content.getTitle());
+            
+            Map<String, Double> interestOverTime = new HashMap<>();
+            if (historicalDates != null && !historicalDates.isEmpty() && 
+                historicalValues != null && !historicalValues.isEmpty()) {
+                for (int i = 0; i < historicalDates.size(); i++) {
+                    interestOverTime.put(historicalDates.get(i).toString(), historicalValues.get(i));
+                }
+            } else {
+                // Add default current timestamp with neutral value
+                interestOverTime.put(LocalDateTime.now().toString(), 0.5);
+            }
+            trendData.put("interestOverTime", interestOverTime);
+        }
     }
 } catch (Exception e) {
     log.warn("Error analyzing trends for content: {}", content.getTitle(), e);
@@ -595,6 +650,7 @@ content.setTrendData(objectMapper.writeValueAsString(trendData));
 
         // Core content specifications
         promptBuilder.append("Content Specifications:\n");
+        promptBuilder.append("Language: ").append(request.getLanguage() != null ? request.getLanguage() : "en").append("\n");
         promptBuilder.append("Topic: ").append(request.getTopic()).append("\n");
         if (request.getTitle() != null) {
             promptBuilder.append("Title: ").append(request.getTitle()).append("\n");
@@ -603,6 +659,7 @@ content.setTrendData(objectMapper.writeValueAsString(trendData));
         promptBuilder.append("Emotional Tone: ").append(request.getEmotionalTone()).append("\n");
         promptBuilder.append("Target Audience: ").append(request.getTargetAudience()).append("\n");
         promptBuilder.append("Writing Style: ").append(request.getWritingStyleSample()).append("\n");
+        promptBuilder.append("Contegory: ").append(request.getCategory() != null ? request.getCategory() : "general").append("\n");
         if (request.getRegion() != null && !request.getRegion().isEmpty()) {
             promptBuilder.append("Region: ").append(request.getRegion()).append("\n");
             promptBuilder.append("- Use region-appropriate language and cultural references\n");
@@ -638,10 +695,37 @@ content.setTrendData(objectMapper.writeValueAsString(trendData));
                 .forEach(keyword -> promptBuilder.append("* ").append(keyword).append("\n"));
     }
 
+    if (request.getKeywords() != null && !request.getKeywords().isEmpty()) {
+        promptBuilder.append("\nSemantic Context (Word2Vec Analysis):\n");
+        
+        // Get keywords and find semantically related terms
+        Arrays.stream(request.getKeywords().split(",\\s*"))
+            .forEach(keyword -> {
+                List<String> semanticallySimilar = word2VecService.findSimilarWords(keyword.trim(), 3);
+                if (!semanticallySimilar.isEmpty()) {
+                    promptBuilder.append("* ").append(keyword.trim()).append(" context:\n");
+                    semanticallySimilar.forEach(similar -> 
+                        promptBuilder.append("  - ").append(similar).append("\n")
+                    );
+                }
+            });
+    }
+    
+    // Add topic-based semantic analysis
+    if (request.getTopic() != null) {
+        List<String> topicContext = word2VecService.findSimilarWords(request.getTopic(), 5);
+        if (!topicContext.isEmpty()) {
+            promptBuilder.append("\nTopic Semantic Context:\n");
+            topicContext.forEach(contextWord -> 
+                promptBuilder.append("* ").append(contextWord).append("\n")
+            );
+        }
+    }
+
     // Get trending topics and their keywords
 List<TrendData> trendingTopics = trendAnalysisService.getTrendingTopics();
 if (!trendingTopics.isEmpty()) {
-    promptBuilder.append("\nTrending Topics and Keywords:\n");
+    promptBuilder.append("\nTrending Topics and Keywords (incorporate naturally):\n");
     trendingTopics.stream()
         .limit(5)
         .forEach(trend -> {
@@ -652,16 +736,21 @@ if (!trendingTopics.isEmpty()) {
             
             // Add related keywords for each trend
             Map<String, Object> flattenedTopicsMap = new HashMap<>();
-Map<String, Map<String, Object>> trendingTopicsMap = trend.getTrendingTopicsMap();
-if (trendingTopicsMap != null && !trendingTopicsMap.isEmpty()) {
-    trendingTopicsMap.forEach((keyword, dataMap) -> {
+            Map<String, Map<String, Object>> trendingTopicsMap = trend.getTrendingTopicsMap();
+            if (trendingTopicsMap != null && !trendingTopicsMap.isEmpty()) {
+                trendingTopicsMap.forEach((keyword, dataMap) -> {
+                    if (dataMap != null && !dataMap.isEmpty()) {
         // Choose how you want to flatten: either use the first value or concatenate
-        flattenedTopicsMap.put(keyword, dataMap.values().iterator().next());
-    });
-    
-    flattenedTopicsMap.forEach((keyword, data) -> 
-        promptBuilder.append("  - ").append(keyword).append("\n")
-    );
+                        Object value = dataMap.values().iterator().next();
+                        if (value != null) {
+                            flattenedTopicsMap.put(keyword, value);
+                        }
+                    }
+                });
+                
+                flattenedTopicsMap.forEach((keyword, data) -> 
+                    promptBuilder.append("  - ").append(keyword).append("\n")
+                );
 }
         });
 }
@@ -731,7 +820,11 @@ if (trendingTopicsMap != null && !trendingTopicsMap.isEmpty()) {
             
             // Create content object with the full response
             Content content = new Content();
-            content.setContentBody(generatedContent.trim());
+            // If user provided edited content, use that instead of generated content
+content.setContentBody(request.getEditedContent() != null ? 
+request.getEditedContent().trim() : 
+generatedContent.trim());
+            content.setLanguage(request.getLanguage() != null ? request.getLanguage() : "en");
 
             Map<String, Double> readabilityMetrics = calculateReadabilityMetrics(content.getContentBody());
 content.setReadabilityScore(objectMapper.writeValueAsString(readabilityMetrics));

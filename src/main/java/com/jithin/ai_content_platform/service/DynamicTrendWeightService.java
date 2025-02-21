@@ -47,12 +47,10 @@ public class DynamicTrendWeightService {
                 return getFallbackWeights();
             }
             
-            Map<String, Integer> metrics = new HashMap<>();
+            Map<String, Number> metrics = new HashMap<>();
             for (Map.Entry<String, Object> entry : originalMetrics.entrySet()) {
-                if (entry.getValue() instanceof Integer) {
-                    metrics.put(entry.getKey(), (Integer) entry.getValue());
-                } else if (entry.getValue() instanceof Double) {
-                    metrics.put(entry.getKey(), ((Double) entry.getValue()).intValue());
+                if (entry.getValue() instanceof Number) {
+                    metrics.put(entry.getKey(), (Number) entry.getValue());
                 }
             }
             
@@ -105,58 +103,49 @@ public class DynamicTrendWeightService {
         }
     }
     
-    private double calculateViralityFromMetrics(Map<String, Integer> metrics, double engagement) {
-        try {
-            double shares = getMetricValue(metrics, "shares", 0.0);
-            double likes = getMetricValue(metrics, "likes", 0.0);
-            double comments = getMetricValue(metrics, "comments", 0.0);
-            double retweets = getMetricValue(metrics, "retweets", 0.0);
-            double saves = getMetricValue(metrics, "saves", 0.0);
-            
-            // Normalize metrics with adjusted thresholds for better social performance
-            double normalizedShares = normalize(shares, 0, 2000);  // Increased threshold
-            double normalizedLikes = normalize(likes, 0, 10000);   // Increased threshold
-            double normalizedComments = normalize(comments, 0, 1000); // Increased threshold
-            double normalizedRetweets = normalize(retweets, 0, 1500);
-            double normalizedSaves = normalize(saves, 0, 500);
-            
-            // Enhanced weighted combination with new metrics
-            double viralityScore = (
-                normalizedShares * 0.25 +     // Reduced weight
-                normalizedLikes * 0.2 +       // Reduced weight
-                normalizedComments * 0.25 +   // Increased weight for engagement
-                normalizedRetweets * 0.2 +    // New metric
-                normalizedSaves * 0.1         // New metric
-            ) * (engagement > 0 ? engagement * 1.2 : 1.0); // Increased engagement multiplier
-            
-            return Math.min(1.0, viralityScore); // Ensure we don't exceed 1.0
-        } catch (Exception e) {
-            log.warn("Error calculating virality score from metrics", e);
-            return 0.5;
-        }
+    private double calculateViralityFromMetrics(Map<String, Number> metrics, double engagement) {
+        double shares = metrics.get("shares").doubleValue();
+        double views = metrics.get("views").doubleValue();
+        
+        // Calculate virality score based on share rate and engagement
+        double shareRate = views > 0 ? shares / views : 0;
+        return normalize((shareRate * 0.7 + engagement * 0.3), 0, 1);
     }
     
-    private double calculateRelevanceFromMetrics(Map<String, Integer> metrics) {
-        try {
-            double relevanceScore = getMetricValue(metrics, "relevanceScore", 0.5);
-            double topicMatch = getMetricValue(metrics, "topicMatch", 0.5);
-            
-            return (relevanceScore * 0.6 + topicMatch * 0.4);
-        } catch (Exception e) {
-            log.warn("Error calculating relevance score from metrics", e);
-            return 0.5;
-        }
+    private double calculateRelevanceFromMetrics(Map<String, Number> metrics) {
+        double comments = metrics.get("comments").doubleValue();
+        double likes = metrics.get("likes").doubleValue();
+        double views = metrics.get("views").doubleValue();
+        
+        // Calculate relevance based on engagement metrics
+        double commentRate = views > 0 ? comments / views : 0;
+        double likeRate = views > 0 ? likes / views : 0;
+        
+        return normalize((commentRate * 0.4 + likeRate * 0.6), 0, 1);
     }
     
-    private double calculateCompetitorScoreFromMetrics(Map<String, Integer> metrics) {
+    private double calculateCompetitorScoreFromMetrics(Map<String, Number> metrics) {
         try {
-            double competitorScore = getMetricValue(metrics, "competitorScore", 0.5);
-            double marketShare = getMetricValue(metrics, "marketShare", 0.5);
+            // Get the raw metrics we already have
+            double engagement = metrics.get("engagement").doubleValue();
             
-            return (competitorScore * 0.7 + marketShare * 0.3);
+            // Calculate a composite score based on the metrics we have
+            double views = metrics.get("views").doubleValue();
+            double totalInteractions = metrics.get("likes").doubleValue() + 
+                                      metrics.get("shares").doubleValue() * 2 + // Shares count double
+                                      metrics.get("comments").doubleValue() * 3; // Comments count triple
+            
+            // Calculate interaction rate (weighted interactions per view)
+            double interactionRate = views > 0 ? totalInteractions / views : 0;
+            
+            // Combine engagement score with interaction rate
+            double score = (engagement * 0.6) + (interactionRate * 0.4);
+            
+            // Normalize to 0-1 range
+            return normalize(score, 0, 1);
         } catch (Exception e) {
-            log.warn("Error calculating competitor score from metrics", e);
-            return 0.5;
+            log.warn("Error calculating competitor score: {}", e.getMessage());
+            return 0.5; // Default competitor score
         }
     }
     
@@ -174,16 +163,12 @@ public class DynamicTrendWeightService {
         return weights;
     }
     
-    private double getMetricValue(Map<String, Integer> metrics, String key, double defaultValue) {
+    private double getMetricValue(Map<String, Number> metrics, String key, double defaultValue) {
         if (metrics == null || !metrics.containsKey(key)) {
             return defaultValue;
         }
         
-        Object value = metrics.get(key);
-        if (value instanceof Number) {
-            return ((Number) value).doubleValue();
-        }
-        return defaultValue;
+        return metrics.get(key).doubleValue();
     }
     
     private double normalize(double value, double min, double max) {
@@ -222,10 +207,10 @@ public class DynamicTrendWeightService {
     private double calculateMomentumScore(Content content) {
         try {
             Map<String, Object> originalMetrics = content.getMetricsMap();
-            Map<String, Integer> metrics = new HashMap<>();
+            Map<String, Number> metrics = new HashMap<>();
             for (Map.Entry<String, Object> entry : originalMetrics.entrySet()) {
-                if (entry.getValue() instanceof Integer) {
-                    metrics.put(entry.getKey(), (Integer) entry.getValue());
+                if (entry.getValue() instanceof Number) {
+                    metrics.put(entry.getKey(), (Number) entry.getValue());
                 }
             }
             double recentEngagement = content.getEngagement() != null ? content.getEngagement() : 0.0;
@@ -272,7 +257,7 @@ public class DynamicTrendWeightService {
      * @param metrics Map of metric names to their values
      * @return true if all required metrics are present, false otherwise
      */
-    private boolean hasRequiredMetrics(Map<String, Integer> metrics) {
+    private boolean hasRequiredMetrics(Map<String, Number> metrics) {
         if (metrics == null) {
             return false;
         }

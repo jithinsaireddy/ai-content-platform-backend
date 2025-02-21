@@ -27,8 +27,25 @@ public class ContentLocalizationService {
     @Autowired
     private LocalizationAnalytics analyticsService;
 
-    @Value("${openai.api.key}")
-    private String openAiApiKey;
+    @Autowired
+    private OpenRouterService openRouterService;
+    
+    private static final Map<String, String> REGION_LANGUAGE_MAP = Map.of(
+        "ES", "Spanish",
+        "FR", "French",
+        "DE", "German",
+        "IT", "Italian",
+        "PT", "Portuguese",
+        "NL", "Dutch",
+        "RU", "Russian",
+        "JA", "Japanese",
+        "KO", "Korean",
+        "ZH", "Chinese"
+    );
+    
+    private String getLanguageForRegion(String region) {
+        return REGION_LANGUAGE_MAP.getOrDefault(region.toUpperCase(), "English");
+    }
 
     public Map<String, Object> localizeContent(Content content, List<String> targetRegions) {
         log.info("Localizing content for regions: {}", targetRegions);
@@ -171,13 +188,77 @@ public class ContentLocalizationService {
     }
 
     private String translateContent(String content, String region, Map<String, Object> requirements) {
-        // Enhanced translation with cultural context
-        return "translated content";
+        try {
+            String targetLanguage = getLanguageForRegion(region);
+            
+            List<Map<String, String>> messages = new ArrayList<>();
+            messages.add(Map.of(
+                "role", "system",
+                "content", "You are a professional translator with expertise in cultural context and localization. Translate the content while preserving meaning and adapting to cultural nuances."
+            ));
+            
+            String prompt = String.format(
+                "Translate the following content to %s, considering these regional requirements:\n\n" +
+                "Content: %s\n\n" +
+                "Regional Requirements:\n%s\n\n" +
+                "Instructions:\n" +
+                "1. Maintain the original meaning\n" +
+                "2. Adapt idioms and expressions to local equivalents\n" +
+                "3. Consider cultural context\n" +
+                "4. Preserve formatting and structure\n" +
+                "5. Return ONLY the translated content",
+                targetLanguage, content, requirements.toString()
+            );
+            
+            messages.add(Map.of("role", "user", "content", prompt));
+            
+            Map<String, Object> response = openRouterService.createChatCompletion(
+                "gpt-4-turbo",
+                messages,
+                Map.of("temperature", 0.7)
+            );
+            
+            return openRouterService.extractContentFromResponse(response);
+        } catch (Exception e) {
+            log.error("Error translating content: ", e);
+            throw new RuntimeException("Failed to translate content");
+        }
     }
 
     private String culturallyAdaptContent(String content, String region, Map<String, Object> sensitivityAnalysis) {
-        // Enhanced cultural adaptation with sensitivity analysis
-        return "culturally adapted content";
+        try {
+            List<Map<String, String>> messages = new ArrayList<>();
+            messages.add(Map.of(
+                "role", "system",
+                "content", "You are a cultural adaptation expert. Adapt the content to be culturally appropriate and engaging for the target region while maintaining the core message."
+            ));
+            
+            String prompt = String.format(
+                "Adapt the following content for the %s region, considering these sensitivity points:\n\n" +
+                "Content: %s\n\n" +
+                "Sensitivity Analysis:\n%s\n\n" +
+                "Instructions:\n" +
+                "1. Adapt cultural references\n" +
+                "2. Adjust tone and style\n" +
+                "3. Consider local customs and values\n" +
+                "4. Address sensitivity points\n" +
+                "5. Return ONLY the adapted content",
+                region, content, sensitivityAnalysis.toString()
+            );
+            
+            messages.add(Map.of("role", "user", "content", prompt));
+            
+            Map<String, Object> response = openRouterService.createChatCompletion(
+                "gpt-4-turbo",
+                messages,
+                Map.of("temperature", 0.7)
+            );
+            
+            return openRouterService.extractContentFromResponse(response);
+        } catch (Exception e) {
+            log.error("Error adapting content: ", e);
+            throw new RuntimeException("Failed to adapt content");
+        }
     }
 
     private Map<String, Object> optimizeForRegionalSEO(String content, String region) {

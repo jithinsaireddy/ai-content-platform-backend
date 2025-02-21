@@ -2,8 +2,10 @@ package com.jithin.ai_content_platform.service;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.cache.annotation.Cacheable;
 import org.springframework.http.*;
 import org.springframework.stereotype.Service;
+import org.springframework.util.DigestUtils;
 import org.springframework.web.client.RestTemplate;
 import lombok.extern.slf4j.Slf4j;
 
@@ -30,6 +32,7 @@ public class OpenRouterService {
         this.objectMapper = new ObjectMapper();
     }
 
+    @Cacheable(value = "openRouterResponses", key = "#root.method.name + '_' + #model + '_' + T(java.util.Objects).hash(#messages) + '_' + T(java.util.Objects).hash(#extraBody)", unless = "#result == null")
     public Map<String, Object> createChatCompletion(String model, List<Map<String, String>> messages, Map<String, Object> extraBody) {
         try {
             HttpHeaders headers = new HttpHeaders();
@@ -68,6 +71,36 @@ public class OpenRouterService {
         } catch (Exception e) {
             log.error("Error calling OpenRouter API: ", e);
             throw new RuntimeException("Failed to create chat completion", e);
+        }
+    }
+
+    public String generateCacheKey(String model, List<Map<String, String>> messages, Map<String, Object> extraBody) {
+        try {
+            // Create a string that combines all input parameters
+            StringBuilder keyBuilder = new StringBuilder();
+            keyBuilder.append(model);
+            
+            // Add messages
+            for (Map<String, String> message : messages) {
+                keyBuilder.append("_").append(message.get("role")).append(":").append(message.get("content"));
+            }
+            
+            // Add relevant extraBody parameters that affect the output
+            if (extraBody != null) {
+                if (extraBody.containsKey("temperature")) {
+                    keyBuilder.append("_temp:").append(extraBody.get("temperature"));
+                }
+                if (extraBody.containsKey("max_tokens")) {
+                    keyBuilder.append("_max:").append(extraBody.get("max_tokens"));
+                }
+            }
+            
+            // Generate MD5 hash of the key to keep it a reasonable length
+            return DigestUtils.md5DigestAsHex(keyBuilder.toString().getBytes());
+        } catch (Exception e) {
+            log.error("Error generating cache key", e);
+            // Fallback to a timestamp-based key if there's an error
+            return "fallback_" + System.currentTimeMillis();
         }
     }
 
@@ -115,4 +148,3 @@ public class OpenRouterService {
         }
     }
 }
-

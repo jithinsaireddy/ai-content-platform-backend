@@ -30,7 +30,9 @@ public class ContentRequest {
     private Map<String, String> metadata; // Additional metadata for the content
     private Long communityModelId; // ID of the community model to use for generation
     private String description; // Description of the content
-    private boolean includeStrategyInsights = true; // Default to false
+    private boolean includeStrategyInsights = false; // Default to false
+    private String language = "en"; // Language for content generation, defaults to English
+    private String editedContent; // Content edited by user after generation
 
     // In ContentRequest.java
     public String getWritingStyleSample() {
