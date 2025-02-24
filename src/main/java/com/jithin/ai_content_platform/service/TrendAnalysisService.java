@@ -1932,17 +1932,96 @@ public List<String> findRelatedKeywords(String topic) {
         return TrendPattern.UNDEFINED;
     }
 
+    private static final ThreadLocal<Boolean> skipSaving = new ThreadLocal<>();
+    
+    public static void setSkipSaving(boolean skip) {
+        skipSaving.set(skip);
+    }
+    
+    public static void clearSkipSaving() {
+        skipSaving.remove();
+    }
+
     public List<TrendData> getTrendingTopics() {
-        return getTrendingTopicsInternal();
+        try {
+            if (Boolean.TRUE.equals(skipSaving.get())) {
+                return getTrendingTopicsWithoutSaving();
+            }
+            return getTrendingTopicsInternal();
+        } finally {
+            clearSkipSaving();
+        }
+    }
+
+    public List<TrendData> getTrendingTopics(boolean skipSaving) {
+        if (skipSaving) {
+            return getTrendingTopicsWithoutSaving();
+        }
+        return getTrendingTopics();
+    }
+    
+    private List<TrendData> getTrendingTopicsWithoutSaving() {
+        logger.info("Fetching trending topics from external sources without saving");
+        List<TrendData> trends = new ArrayList<>();
+        
+        try {
+            // Scrape from external sources
+            trends.addAll(webScrapingService.scrapeGoogleTrends());
+            trends.addAll(webScrapingService.scrapeTwitterTrends());
+            trends.addAll(webScrapingService.scrapeHackerNews());
+            trends.addAll(webScrapingService.scrapeGitHubTrends());
+            trends.addAll(webScrapingService.scrapeStackOverflow());
+    
+            if (!trends.isEmpty()) {
+                return trends;
+            }
+            
+            // Fallback to database check without saving
+            LocalDateTime cutoff = LocalDateTime.now().minusHours(24);
+            List<TrendData> recentTrends = trendDataRepository.findLatestTrends(cutoff);
+            
+            if (!recentTrends.isEmpty()) {
+                return recentTrends;
+            }
+            
+            // Last resort fallback
+            Map<String, Object> trendData = new HashMap<>();
+            trendData.put("interest_over_time", Arrays.asList(
+                Map.of("date", LocalDateTime.now(), "value", Math.random() * 100),
+                Map.of("date", LocalDateTime.now().minusDays(1), "value", Math.random() * 100)
+            ));
+            trends.addAll(convertMapToTrendData(trendData));
+            
+            return trends;
+        } catch (Exception e) {
+            logger.error("Error fetching trending topics: ", e);
+            return new ArrayList<>();
+        }
     }
     
     @SuppressWarnings("unchecked")
     private List<TrendData> getTrendingTopicsInternal() {
-        logger.info("Fetching trending topics from database and external sources");
+        logger.info("Fetching trending topics from external sources and database");
         List<TrendData> trends = new ArrayList<>();
         
         try {
-            // First check for recent trends in database (within last 24 hours)
+            // First try to scrape from external sources
+            logger.info("Fetching trends from external sources");
+            trends.addAll(webScrapingService.scrapeGoogleTrends());
+            trends.addAll(webScrapingService.scrapeTwitterTrends());
+            trends.addAll(webScrapingService.scrapeHackerNews());
+            trends.addAll(webScrapingService.scrapeGitHubTrends());
+            trends.addAll(webScrapingService.scrapeStackOverflow());
+    
+            // If web scraping successful, save to database and return
+            if (!trends.isEmpty()) {
+                logger.info("Successfully scraped {} trends from external sources", trends.size());
+                trendDataRepository.saveAll(trends);
+                return trends;
+            }
+            
+            // If web scraping yields no results, check database for recent trends
+            logger.info("No trends from external sources, checking database");
             LocalDateTime cutoff = LocalDateTime.now().minusHours(24);
             List<TrendData> recentTrends = trendDataRepository.findLatestTrends(cutoff);
             
@@ -1951,38 +2030,26 @@ public List<String> findRelatedKeywords(String topic) {
                 return recentTrends;
             }
             
-            // If no recent trends in database, scrape from external sources
-            logger.info("No recent trends found in database, fetching from external sources");
-            trends.addAll(webScrapingService.scrapeGoogleTrends());
-            trends.addAll(webScrapingService.scrapeTwitterTrends());
-            trends.addAll(webScrapingService.scrapeHackerNews());
-            trends.addAll(webScrapingService.scrapeGitHubTrends());
-            trends.addAll(webScrapingService.scrapeStackOverflow());
-  
-            // Fallback to internal analysis if web scraping yields no results
-            if (trends.isEmpty()) {
-                logger.warn("Web scraping yielded no results, falling back to internal analysis");
-                Map<String, Object> trendData = new HashMap<>();
-                trendData.put("interest_over_time", Arrays.asList(
-                    Map.of("date", LocalDateTime.now(), "value", Math.random() * 100),
-                    Map.of("date", LocalDateTime.now().minusDays(1), "value", Math.random() * 100)
-                ));
-                trends.addAll(convertMapToTrendData(trendData));
-            }
+            // Fallback to internal analysis if both web scraping and database yield no results
+            logger.warn("No trends found from external sources or database, falling back to internal analysis");
+            Map<String, Object> trendData = new HashMap<>();
+            trendData.put("interest_over_time", Arrays.asList(
+                Map.of("date", LocalDateTime.now(), "value", Math.random() * 100),
+                Map.of("date", LocalDateTime.now().minusDays(1), "value", Math.random() * 100)
+            ));
+            trends.addAll(convertMapToTrendData(trendData));
             
-            // Save new trends to database
+            // Save fallback trends to database
             if (!trends.isEmpty()) {
                 trendDataRepository.saveAll(trends);
-                logger.info("Successfully saved {} new trending topics to database", trends.size());
             }
+            
+            return trends;
+            
         } catch (Exception e) {
-            logger.error("Error fetching trending topics: {}", e.getMessage());
-            // Fallback to most recent trends in database regardless of age
-            trends = trendDataRepository.findLatestTrendsOptimized(LocalDateTime.now().minusMonths(1), 100);;
-            logger.info("Falling back to {} most recent trends from database", trends.size());
+            logger.error("Error fetching trending topics: ", e);
+            return new ArrayList<>();
         }
-
-        return trends;
     }
     
     private double calculateEnhancedTrendScore(Map<String, Object> trendData) {

@@ -33,6 +33,8 @@ public class ContentRequest {
     private boolean includeStrategyInsights = false; // Default to false
     private String language = "en"; // Language for content generation, defaults to English
     private String editedContent; // Content edited by user after generation
+    private String desiredContentLength; // Desired length for content generation (e.g., "short", "medium", "long")
+    private boolean skipTrendSaving = false;
 
     // In ContentRequest.java
     public String getWritingStyleSample() {
@@ -76,6 +78,14 @@ public class ContentRequest {
         this.keywords = extractKeywords(content.getContentBody());
     }
 
+    public boolean isSkipTrendSaving() {
+        return skipTrendSaving;
+    }
+    
+    public void setSkipTrendSaving(boolean skipTrendSaving) {
+        this.skipTrendSaving = skipTrendSaving;
+    }
+
     private String extractKeywords(String contentBody) {
         // Simple keyword extraction - take first few significant words
         if (contentBody == null) return "";
@@ -104,6 +114,33 @@ public class ContentRequest {
     }
 
     public Integer getContentLength() {
-        return contentBody != null ? contentBody.length() : null;
+        if (contentBody != null) {
+            return contentBody.length();
+        }
+        if (desiredContentLength != null) {
+            switch (desiredContentLength.toLowerCase()) {
+                case "short":
+                    return 500;
+                case "medium":
+                    return 1000;
+                case "long":
+                    return 2000;
+                default:
+                    try {
+                        return Integer.parseInt(desiredContentLength);
+                    } catch (NumberFormatException e) {
+                        return null;
+                    }
+            }
+        }
+        return null;
+    }
+
+    public String getDesiredContentLength() {
+        return desiredContentLength;
+    }
+
+    public void setDesiredContentLength(String desiredContentLength) {
+        this.desiredContentLength = desiredContentLength;
     }
 }

@@ -666,8 +666,8 @@ content.setTrendData(objectMapper.writeValueAsString(trendData));
             promptBuilder.append("- Consider local trends and preferences\n");
             promptBuilder.append("- Ensure content resonates with regional audience\n");
         }
-        if (request.getContentLength() != null) {
-            promptBuilder.append("Content Length: ").append(request.getContentLength()).append("\n");
+        if (request.getDesiredContentLength() != null) {
+            promptBuilder.append("Content Length: ").append(request.getDesiredContentLength()).append(" words\n");
         }
 
         // Add SEO optimization if requested
@@ -723,6 +723,8 @@ content.setTrendData(objectMapper.writeValueAsString(trendData));
     }
 
     // Get trending topics and their keywords
+    // Get trending topics and their keywords
+TrendAnalysisService.setSkipSaving(true);
 List<TrendData> trendingTopics = trendAnalysisService.getTrendingTopics();
 if (!trendingTopics.isEmpty()) {
     promptBuilder.append("\nTrending Topics and Keywords (incorporate naturally):\n");
