@@ -62,6 +62,7 @@ public class AuthController {
         user.setUsername(signUpRequest.getUsername());
         user.setEmail(signUpRequest.getEmail());
         user.setPassword(passwordEncoder.encode(signUpRequest.getPassword()));
+        user.setIndustry(signUpRequest.getIndustry()); // Set the industry from the request
 
         userRepository.save(user);
 
