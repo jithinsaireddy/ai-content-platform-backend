@@ -14,7 +14,8 @@ import java.util.*;
 @Service
 @Slf4j
 public class OpenRouterService {
-    private final String apiKey;
+    private final String openAiKey;
+    private final String openRouterKey;
     private final String httpReferer;
     private final String appTitle;
     private final RestTemplate restTemplate;
@@ -22,10 +23,12 @@ public class OpenRouterService {
     private static final String OPENROUTER_API_URL = "https://openrouter.ai/api/v1/chat/completions";
 
     public OpenRouterService(
-            @Value("${openai.api.key}") String apiKey,
+            @Value("${openai.api.key}") String openAiKey,
+            @Value("${openrouter.api.key}") String openRouterKey,
             @Value("${openai.http.referer}") String httpReferer,
             @Value("${openai.app.title}") String appTitle) {
-        this.apiKey = apiKey;
+        this.openAiKey = openAiKey;
+        this.openRouterKey = openRouterKey;
         this.httpReferer = httpReferer;
         this.appTitle = appTitle;
         this.restTemplate = new RestTemplate();
@@ -37,7 +40,11 @@ public class OpenRouterService {
         try {
             HttpHeaders headers = new HttpHeaders();
             headers.setContentType(MediaType.APPLICATION_JSON);
-            headers.set("Authorization", "Bearer " + apiKey);
+            try {
+                headers.set("Authorization", "Bearer " + openRouterKey);
+            } catch (Exception e) {
+                headers.set("Authorization", "Bearer " + openAiKey);
+            }
             headers.set("HTTP-Referer", httpReferer);
             headers.set("X-Title", appTitle);
 
