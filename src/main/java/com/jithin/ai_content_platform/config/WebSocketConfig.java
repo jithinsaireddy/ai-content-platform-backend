@@ -22,7 +22,7 @@ public class WebSocketConfig implements WebSocketMessageBrokerConfigurer {
     @Override
     public void registerStompEndpoints(StompEndpointRegistry registry) {
         registry.addEndpoint("/ws")
-                .setAllowedOrigins("http://localhost:3000") // Adjust as per your frontend URL
+                .setAllowedOrigins("*") // Adjust as per your frontend URL
                 .withSockJS()
                 .setDisconnectDelay(30 * 1000) // 30 seconds disconnect delay
                 .setHeartbeatTime(25000)
