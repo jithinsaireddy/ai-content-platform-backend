@@ -12,6 +12,6 @@ COPY . .
 
 # Build the application
 RUN chmod +x mvnw && \
-    ./mvnw package -DskipTests
+    ./mvnw clean package -DskipTests
 
 CMD ["java", "-jar", "target/ai-content-platform-0.0.1-SNAPSHOT.jar"]
