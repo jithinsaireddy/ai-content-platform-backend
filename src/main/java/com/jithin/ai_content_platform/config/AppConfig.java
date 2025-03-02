@@ -16,7 +16,7 @@ public class AppConfig {
         CorsConfiguration configuration = new CorsConfiguration();
 
         // Specify allowed origins
-        configuration.setAllowedOrigins(Arrays.asList("*"));
+        configuration.setAllowedOrigins(Arrays.asList("https://luxury-druid-505aa1.netlify.app", "http://localhost:3000"));
 
         // Specify allowed HTTP methods
         configuration.setAllowedMethods(Arrays.asList("GET", "POST", "PUT", "DELETE", "OPTIONS"));
