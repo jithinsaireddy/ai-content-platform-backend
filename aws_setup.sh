@@ -1,8 +1,16 @@
 #!/bin/bash
 
 # chmod +x aws_setup.sh  // Make the script executable
-# ./aws_setup.sh [--fresh] [--artifact]  // Run the script, optionally with --fresh to force new build and --artifact to use JAR from artifact directory
+# ./aws_setup.sh [--fresh]  // Run the script, optionally with --fresh to force new build
 
+
+# check, format (if needed), mount, and persist /dev/xvdb as /home
+# sudo file -s /dev/xvdb | grep -q 'ext4' || sudo mkfs -t ext4 /dev/xvdb && sudo mount /dev/xvdb /home && sudo chown -R $(whoami):$(whoami) /home && echo "/dev/xvdb /home ext4 defaults,nofail 0 2" | sudo tee -a /etc/fstab
+# if [ ! -d /home/ec2-user ]; then
+#     sudo mkdir -p /home/ec2-user
+#     sudo cp -r /etc/skel/. /home/ec2-user
+#     sudo chown -R ec2-user:ec2-user /home/ec2-user
+# fi
 
 # Function to check if a command exists
 command_exists() {
@@ -23,11 +31,9 @@ print_color() {
 
 # Parse command line arguments
 FRESH_BUILD=false
-USE_ARTIFACT=false
 while [[ "$#" -gt 0 ]]; do
     case $1 in
         --fresh) FRESH_BUILD=true ;;
-        --artifact) USE_ARTIFACT=true ;;
         *) echo "Unknown parameter: $1"; exit 1 ;;
     esac
     shift
@@ -122,31 +128,16 @@ if [ "$github_confirmed" = "y" ]; then
             print_color "red" "Failed to build JAR"
             exit 1
         fi
-        # Copy successful build to artifact directory
-        mkdir -p artifact
-        cp target/app.jar artifact/app.jar
-        print_color "green" "JAR copied to artifact directory for future use"
     else
-        if [ "$USE_ARTIFACT" = true ]; then
-            if [ -f "artifact/app.jar" ]; then
-                print_color "green" "Using JAR from artifact directory..."
-                mkdir -p target
-                cp artifact/app.jar target/app.jar
-            else
-                print_color "red" "No JAR found in artifact directory"
-                exit 1
-            fi
+        # Check target directory first
+        if [ -f "target/app.jar" ]; then
+            print_color "green" "Found JAR in target directory, using it..."
         else
-            # Check target directory first
-            if [ -f "target/app.jar" ]; then
-                print_color "green" "Found JAR in target directory, using it..."
-            else
-                print_color "yellow" "No existing JAR found. Building new one..."
-                ./mvnw clean package -DskipTests
-                if [ $? -ne 0 ]; then
-                    print_color "red" "Failed to build JAR"
-                    exit 1
-                fi
+            print_color "yellow" "No existing JAR found. Building new one..."
+            ./mvnw clean package -DskipTests
+            if [ $? -ne 0 ]; then
+                print_color "red" "Failed to build JAR"
+                exit 1
             fi
         fi
     fi
