@@ -43,6 +43,26 @@ else
     echo "Git is already installed"
 fi
 
+# Check and install Java if not present
+if ! command_exists java; then
+    print_color "yellow" "Java not found. Installing Java..."
+    sudo yum install -y java-17-amazon-corretto-devel
+else
+    print_color "green" "Java is already installed"
+fi
+
+# Set JAVA_HOME if not already set
+if [ -z "$JAVA_HOME" ]; then
+    # Find Java installation path
+    JAVA_PATH=$(dirname $(dirname $(readlink -f $(which java))))
+    echo "export JAVA_HOME=$JAVA_PATH" >> ~/.bashrc
+    echo "export PATH=\$PATH:\$JAVA_HOME/bin" >> ~/.bashrc
+    source ~/.bashrc
+    print_color "green" "JAVA_HOME has been set to $JAVA_PATH"
+else
+    print_color "green" "JAVA_HOME is already set to $JAVA_HOME"
+fi
+
 # Generate SSH key if it doesn't exist
 SSH_KEY_PATH="$HOME/.ssh/id_ed25519"
 if [ ! -f "$SSH_KEY_PATH" ]; then
