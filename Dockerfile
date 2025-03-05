@@ -7,18 +7,18 @@ RUN apt-get update && apt-get install -y \
 
 WORKDIR /app
 
-# Copy only the POM file first
-COPY pom.xml mvnw ./
-COPY .mvn .mvn
+# # Copy only the POM file first
+# COPY pom.xml mvnw ./
+# COPY .mvn .mvn
 
-# Download dependencies
-RUN chmod +x mvnw && \
-    ./mvnw dependency:go-offline
+# # Download dependencies
+# RUN chmod +x mvnw && \
+#     ./mvnw dependency:go-offline
 
 # Copy the rest of the project
 COPY . .
 
 # Build the application
-RUN ./mvnw clean package -DskipTests
+# RUN ./mvnw clean package -DskipTests
 
 CMD ["java", "-jar", "target/app.jar"]
