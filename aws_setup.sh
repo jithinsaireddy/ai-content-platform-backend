@@ -156,9 +156,9 @@ if [ "$github_confirmed" = "y" ]; then
     
     if [ "$FRESH_BUILD" = true ]; then
         docker-compose build --no-cache
-        docker-compose up
+        docker-compose up -d
     else
-        docker-compose up
+        docker-compose up -d
     fi
 
     print_color "green" "Setup complete! Application is running."
