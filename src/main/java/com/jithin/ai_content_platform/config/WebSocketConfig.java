@@ -4,12 +4,16 @@ package com.jithin.ai_content_platform.config;
 
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.messaging.simp.config.*;
 import org.springframework.scheduling.TaskScheduler;
 import org.springframework.scheduling.concurrent.ThreadPoolTaskScheduler;
 import org.springframework.web.socket.config.annotation.*;
+
+import java.util.Arrays;
+import java.util.List;
 
 @Slf4j
 @Configuration
@@ -19,10 +23,14 @@ public class WebSocketConfig implements WebSocketMessageBrokerConfigurer {
     @Autowired
     private WebSocketAuthChannelInterceptorAdapter webSocketAuthChannelInterceptorAdapter;
 
+    @Value("${cors.allowed-origins}")
+    private String allowedOrigins;
+
     @Override
     public void registerStompEndpoints(StompEndpointRegistry registry) {
+        List<String> origins = Arrays.asList(allowedOrigins.split(","));
         registry.addEndpoint("/ws")
-                .setAllowedOrigins("https://luxury-druid-505aa1.netlify.app", "http://localhost:3000", "https://sentlyze.xyz") // Adjust as per your frontend URL
+                .setAllowedOrigins(origins.toArray(new String[0])) // Using allowed origins from properties
                 .withSockJS()
                 .setDisconnectDelay(30 * 1000) // 30 seconds disconnect delay
                 .setHeartbeatTime(25000)
