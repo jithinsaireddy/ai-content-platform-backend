@@ -23,6 +23,7 @@ import edu.stanford.nlp.sentiment.SentimentCoreAnnotations;
 import edu.stanford.nlp.trees.Tree;
 import edu.stanford.nlp.util.CoreMap;
 import lombok.extern.slf4j.Slf4j;
+import java.io.IOException;
 import org.deeplearning4j.models.embeddings.loader.WordVectorSerializer;
 import org.deeplearning4j.models.word2vec.Word2Vec;
 import org.deeplearning4j.text.sentenceiterator.BasicLineIterator;
@@ -44,6 +45,8 @@ import org.springframework.transaction.annotation.Transactional;
 import java.util.stream.Collectors;
 
 import jakarta.annotation.PostConstruct;
+
+import java.io.BufferedWriter;
 import java.io.File;
 import java.io.FileWriter;
 import java.time.DayOfWeek;
@@ -665,6 +668,29 @@ if (!relatedContent.isEmpty()) {
 
         return phrases;
     }
+
+    public void trainModelWithTrendingTopics(List<String> trendingTopics) {
+    try {
+        // Prepare corpus from trending topics
+        String corpusFile = prepareCorpusFromTopics(trendingTopics);
+        
+        // Train the Word2Vec model
+        trainWordEmbeddings(corpusFile);
+    } catch (Exception e) {
+        logger.error("Error training Word2Vec model with trending topics", e);
+    }
+}
+
+private String prepareCorpusFromTopics(List<String> topics) throws IOException {
+    File corpusFile = new File("corpus.txt");
+    try (BufferedWriter writer = new BufferedWriter(new FileWriter(corpusFile))) {
+        for (String topic : topics) {
+            writer.write(topic);
+            writer.newLine();
+        }
+    }
+    return corpusFile.getAbsolutePath();
+}
 
     private String createTemporaryCorpus(List<Content> content) throws Exception {
         File tempFile = File.createTempFile("content_corpus", ".txt");
