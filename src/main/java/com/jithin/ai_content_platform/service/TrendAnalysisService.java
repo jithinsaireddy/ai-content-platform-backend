@@ -161,7 +161,7 @@ private int defaultLimit;
         return sample;
     }
 
-    @Scheduled(fixedRate = 3600000) // Run every hour
+    // @Scheduled(fixedRate = 3600000) // Run every hour
     @Cacheable(value = "analyzedTrends", key = "T(java.time.LocalDateTime).now().format(T(java.time.format.DateTimeFormatter).ISO_DATE)")
     public void analyzeTrends() {
         logger.info("Starting trend analysis...");
@@ -2042,7 +2042,7 @@ public List<String> findRelatedKeywords(String topic) {
             // If web scraping successful, save to database and return
             if (!trends.isEmpty()) {
                 logger.info("Successfully scraped {} trends from external sources", trends.size());
-                trendDataRepository.saveAll(trends);
+                // trendDataRepository.saveAll(trends);
                 return trends;
             }
             

@@ -1,0 +1,11 @@
+AI Content Platform
+Copyright 2025 Jithin Pothi Reddy
+
+This product includes software developed by:
+- The Spring Framework Project (https://spring.io/)
+- The Apache Software Foundation (https://www.apache.org/)
+- Deeplearning4j (https://deeplearning4j.org/)
+- Stanford CoreNLP (https://stanfordnlp.github.io/CoreNLP/)
+- OpenNLP (https://opennlp.apache.org/)
+
+Please review LICENSE files within each dependency for more detailed licensing information.
